@@ -26,3 +26,5 @@ Thumbs.db
 ## Python
 __pycache__/
 *.pyc
+## pi agent
+.pi/
