@@ -1,0 +1,37 @@
+## IDF Component Manager Manifest File
+##
+## 仅保留 esp32-s3 / ESP-SPARKBOT 实际使用到的组件。
+## 需要新增板子支持时，从上游 xiaozhi-esp32 的 main/idf_component.yml 里
+## 把对应条目（含 rules）拷回来即可。
+dependencies:
+  ## 网络 / 4G
+  78/esp-wifi-connect: ~3.0.2
+  78/esp-ml307: ~3.5.3
+
+  ## 音频编解码 / 唤醒词
+  78/esp-opus-encoder: ~2.4.1   # 依赖 78/esp-opus
+  espressif/esp_codec_dev: ~1.5
+  espressif/esp-sr: ~2.2.0     # 依赖 dl_fft / esp-dsp
+
+  ## 显示（SparkBot 使用 IDF 内置 esp_lcd 的 st7789 驱动）
+  lvgl/lvgl: ~9.3.0
+  esp_lvgl_port: ~2.6.0
+  78/xiaozhi-fonts: ~1.5.5
+  espressif/esp_mmap_assets: '>=1.2'
+  espressif/esp_new_jpeg: ^0.6.1
+  espressif2022/esp_emote_gfx: ==2.0.0   # display/emote_display.cc 依赖 gfx.h
+
+  ## 摄像头（SparkBot: DVP + SCCB）
+  espressif/esp_video: ==1.3.1  # for compatibility. update version may need to modify this project code.
+  espressif/esp_image_effects: ^1.0.1  # 依赖 esp_imgfx_rotate/color_convert
+
+  ## 外设
+  espressif/i2c_bus: ^1.5.0
+  espressif/button: ~4.1.3
+  espressif/knob: ^1.0.0
+  espressif/led_strip: ~3.0.1
+  espressif/adc_battery_estimation: ^0.2.0
+
+  ## Required IDF version
+  idf:
+    version: '>=5.4.0'

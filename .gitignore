@@ -1,0 +1,28 @@
+## ESP-IDF build output
+build/
+build-*/
+sdkconfig.old
+releases/
+*.elf
+*.bin
+*.map
+
+## Personal configuration (contains WiFi / Douyin keys, do NOT commit)
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
+
+## IDF component manager generated
+managed_components/
+
+## IDE / OS
+.vscode/
+.idea/
+.cache/
+*.swp
+.DS_Store
+Thumbs.db
+
+## Python
+__pycache__/
+*.pyc
