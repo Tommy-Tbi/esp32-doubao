@@ -23,7 +23,7 @@
 #include "wake_word.h"
 #include "protocol.h"
 
-#if CONFIG_USB_MIC_MODE
+#if CONFIG_USB_AUDIO_DEVICE
 #include "usb_audio.h"
 #endif
 
@@ -103,6 +103,13 @@ public:
     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
     bool IsAfeWakeWord();
 
+#if CONFIG_USB_AUDIO_DEVICE
+    // USB Speaker（PC -> 设备）是否已连接
+    bool IsUsbSpeakerActive();
+    // USB 音箱播放任务：PC 送来的音频经 codec 播出
+    void UsbSpeakerTask();
+#endif
+
     void EnableWakeWordDetection(bool enable);
     void EnableVoiceProcessing(bool enable);
     void EnableAudioTesting(bool enable);
@@ -157,8 +164,12 @@ private:
     bool audio_input_need_warmup_ = false;
     bool audio_streaming_ = false;  // Track if audio is being streamed from server
 
-#if CONFIG_USB_MIC_MODE
+#if CONFIG_USB_AUDIO_DEVICE
+    // 设备麦克风 -> PC
     void SendAudioToUsb(const std::vector<int16_t>& pcm);
+    OpusResampler usb_input_resampler_;
+    OpusResampler usb_speaker_resampler_;
+    TaskHandle_t usb_speaker_task_handle_ = nullptr;
 #endif
 
     esp_timer_handle_t audio_power_timer_ = nullptr;

@@ -825,13 +825,39 @@ menu "Camera Configuration"
     endif
 endmenu
 
-config USB_MIC_MODE
-    bool "USB Microphone Mode"
+menu "USB_AUDIO_DEVICE_CONFIG"
+
+config USB_AUDIO_DEVICE
+    bool "USB Audio Device (Speaker + Microphone)"
     default n
     depends on IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C5 || IDF_TARGET_ESP32C6 || IDF_TARGET_ESP32P4
     help
-        Enable USB microphone mode. When enabled, the device will act as
-        a USB audio input device connected to a computer.
+        将设备作为一个 USB 复合音频设备连接到 PC：
+          - USB Speaker    : PC 播放的音频由设备本地扬声器播出
+          - USB Microphone : 设备麦克风音频上传到 PC（可作为 PC 的录音输入）
+        需要 ESP-IDF 的 esp_tinyusb 组件（会由组件管理器自动拉取）。
+
+        打开后 USB 占用内部 USB PHY（USB-OTG），若需要调试请使用串口 JTAG。
+
+    if USB_AUDIO_DEVICE
+
+        config USB_AUDIO_SPEAKER
+            bool "Enable USB Speaker (PC -> device speaker)"
+            default y
+            help
+                开启后 PC 会枚举出一个“USB 扬声器”，PC 播放的音频由设备喇叭播出。
+                固定 48kHz / 16bit / 立体声，设备侧自动下混到本地单声道 codec。
+
+        config USB_AUDIO_MIC
+            bool "Enable USB Microphone (device mic -> PC)"
+            default y
+            help
+                开启后 PC 会枚举出一个“USB 麦克风”，设备麦克风音频上传到 PC。
+                固定 48kHz / 16bit / 单声道（内部从 codec 采样率重采样）。
+
+    endif
+
+endmenu
 
 menu "TAIJIPAI_S3_CONFIG"
     depends on BOARD_TYPE_TAIJI_PI_S3

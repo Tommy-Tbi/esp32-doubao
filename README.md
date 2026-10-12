@@ -145,6 +145,40 @@ unknown → starting → wifi_configuring → idle
 - `kDeviceStateListening`
 - `kDeviceStateSpeaking`
 
+## USB 音箱 + 麦克风（USB 复合音频设备）
+
+设备可作为一个 **USB 复合音频设备** 直接插到 PC 上，无需安装驱动：
+
+| 方向 | 说明 |
+| ---- | ---- |
+| PC → 设备 | PC 枚举出「USB 扬声器」，PC 播放的音频由设备本地喇叭播出（带反馈通道，48kHz/16bit/单声道） |
+| 设备 → PC | PC 枚举出「USB 麦克风」，设备麦克风音频上传给 PC（48kHz/16bit/单声道） |
+
+### 开启方式
+
+```bash
+idf.py menuconfig
+# USB_AUDIO_DEVICE_CONFIG → USB Audio Device (Speaker + Microphone) = y
+#   Enable USB Speaker (PC -> device speaker)          = y
+#   Enable USB Microphone (device mic -> PC)           = y
+idf.py build && idf.py flash monitor
+```
+
+也可以在 `sdkconfig` 中直接写：
+
+```
+CONFIG_USB_AUDIO_DEVICE=y
+CONFIG_USB_AUDIO_SPEAKER=y
+CONFIG_USB_AUDIO_MIC=y
+```
+
+### 说明
+
+- 基于 TinyUSB 的 UAC2 设备类（`espressif/esp_tinyusb`，会在构建时自动拉取）。
+- 打开后占用内部 USB PHY（USB-OTG），日志仍走 USB-Serial-JTAG / UART 不受影响。
+- 采样率固定 48kHz、16bit；设备侧 codec 为单声道，USB 立体声会自动下混。
+- 设备本地正在播 TTS 时，USB 音箱任务会主动让路，避免两路声音叠加。
+
 ## 已修复问题
 
 ### 1. 豆包长回复时状态卡死

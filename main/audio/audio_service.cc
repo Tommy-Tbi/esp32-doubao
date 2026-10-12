@@ -50,8 +50,8 @@ void AudioService::Initialize(AudioCodec* codec) {
 #endif
 
     audio_processor_->OnOutput([this](std::vector<int16_t>&& data) {
-#if CONFIG_USB_MIC_MODE
-        // Send to USB when in USB mic mode
+#if CONFIG_USB_AUDIO_DEVICE
+        // 麦克风数据同时上传到 PC（USB Microphone）
         SendAudioToUsb(data);
 #endif
         // Only send audio data when VAD detects speech
@@ -67,12 +67,36 @@ void AudioService::Initialize(AudioCodec* codec) {
         }
     });
 
-#if CONFIG_USB_MIC_MODE
-    // Initialize USB Audio
-    UsbAudio::GetInstance().Initialize();
-    UsbAudio::GetInstance().SetConnectionCallback([](bool connected) {
-        ESP_LOGI(TAG, "USB Audio %s", connected ? "connected" : "disconnected");
-    });
+#if CONFIG_USB_AUDIO_DEVICE
+    // Initialize USB Audio composite device (speaker + mic)
+    UsbAudio::Config usb_config = {
+        .sample_rate = 48000,
+        .channels = 1,
+        .bits_per_sample = 16,
+#if CONFIG_USB_AUDIO_SPEAKER
+        .speaker_enabled = true,
+#else
+        .speaker_enabled = false,
+#endif
+#if CONFIG_USB_AUDIO_MIC
+        .mic_enabled = true,
+#else
+        .mic_enabled = false,
+#endif
+    };
+    if (UsbAudio::GetInstance().Initialize(usb_config)) {
+        UsbAudio::GetInstance().SetConnectionCallback([](bool connected) {
+            ESP_LOGI(TAG, "USB audio %s", connected ? "connected (speaker+mic)" : "disconnected");
+        });
+        // 输出侧重采样器：codec 输出采样率 -> USB 采样率
+        if (codec_->output_sample_rate() != usb_config.sample_rate) {
+            usb_speaker_resampler_.Configure(usb_config.sample_rate, codec_->output_sample_rate());
+        }
+        // 输入侧重采样器：codec 输入采样率 -> USB 采样率
+        if (codec_->input_sample_rate() != usb_config.sample_rate) {
+            usb_input_resampler_.Configure(codec_->input_sample_rate(), usb_config.sample_rate);
+        }
+    }
 #endif
 
     esp_timer_create_args_t audio_power_timer_args = {
@@ -130,6 +154,16 @@ void AudioService::Start() {
         audio_service->OpusCodecTask();
         vTaskDelete(NULL);
     }, "opus_codec", 2048 * 13, this, 2, &opus_codec_task_handle_);
+
+#if CONFIG_USB_AUDIO_DEVICE
+    /* Start the USB Speaker playback task (PC audio -> local speaker) */
+    if (UsbAudio::GetInstance().IsSpeakerEnabled()) {
+        xTaskCreatePinnedToCore([](void* arg) {
+            AudioService* audio_service = (AudioService*)arg;
+            audio_service->UsbSpeakerTask();
+        }, "usb_speaker", 2048 * 3, this, 4, &usb_speaker_task_handle_, 0);
+    }
+#endif
 }
 
 void AudioService::Stop() {
@@ -762,17 +796,96 @@ bool AudioService::IsAfeWakeWord() {
 #endif
 }
 
-#if CONFIG_USB_MIC_MODE
+#if CONFIG_USB_AUDIO_DEVICE
 void AudioService::SendAudioToUsb(const std::vector<int16_t>& pcm) {
-    if (UsbAudio::GetInstance().IsConnected()) {
-        // Resample to 16kHz if needed
-        if (codec_->input_sample_rate() != 16000) {
-            std::vector<int16_t> resampled(input_resampler_.GetOutputSamples(pcm.size()));
-            input_resampler_.Process(pcm.data(), pcm.size(), resampled.data());
-            UsbAudio::GetInstance().SendAudioData(resampled.data(), resampled.size());
-        } else {
-            UsbAudio::GetInstance().SendAudioData(pcm.data(), pcm.size());
-        }
+    auto& usb = UsbAudio::GetInstance();
+    if (!usb.IsMicEnabled() || !usb.IsConnected()) {
+        return;
     }
+    // Resample to USB sample rate
+    if (codec_->input_sample_rate() != usb.sample_rate()) {
+        std::vector<int16_t> resampled(usb_input_resampler_.GetOutputSamples(pcm.size()));
+        usb_input_resampler_.Process(pcm.data(), pcm.size(), resampled.data());
+        usb.SendMicrophoneData(resampled.data(), resampled.size());
+    } else {
+        usb.SendMicrophoneData(pcm.data(), pcm.size());
+    }
+}
+
+bool AudioService::IsUsbSpeakerActive() {
+    auto& usb = UsbAudio::GetInstance();
+    return usb.IsSpeakerEnabled() && usb.IsConnected();
+}
+
+// PC 作为「音源」把音频送到设备，由设备本地喇叭播出。
+// 设备自身正在播 TTS / 提示音时让路，避免两路声音叠加。
+void AudioService::UsbSpeakerTask() {
+    auto& usb = UsbAudio::GetInstance();
+    const int channels = usb.channels();
+    const int block_samples = 480;  // 48kHz = 10ms
+
+    while (!service_stopped_) {
+        if (!IsUsbSpeakerActive() || usb.AvailableSpeakerSamples() < block_samples * channels) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        // 设备本地正在播 TTS / 提示音则暂缓，避免抢 codec
+        bool local_busy;
+        {
+            std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+            local_busy = !audio_playback_queue_.empty() || !audio_decode_queue_.empty();
+        }
+        if (local_busy) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        // USB 端点每次只给几十字节，这里攒够 10ms 再播放，避免频繁写 codec
+        std::vector<int16_t> usb_pcm(block_samples * channels);
+        size_t got = 0;
+        while (got < usb_pcm.size() && !service_stopped_) {
+            size_t n = usb.FetchSpeakerData(usb_pcm.data() + got, usb_pcm.size() - got);
+            if (n == 0) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
+            got += n;
+        }
+        if (got == 0) {
+            continue;
+        }
+
+        // USB 立体声 -> codec 单声道（下混）
+        if (channels > codec_->output_channels()) {
+            std::vector<int16_t> mono(got / channels);
+            for (size_t i = 0; i < mono.size(); i++) {
+                int32_t sum = 0;
+                for (int c = 0; c < channels; c++) {
+                    sum += usb_pcm[i * channels + c];
+                }
+                mono[i] = sum / channels;
+            }
+            usb_pcm.swap(mono);
+            got = usb_pcm.size();
+        }
+
+        std::vector<int16_t> out_pcm;
+        if (usb.sample_rate() != codec_->output_sample_rate()) {
+            out_pcm.resize(usb_speaker_resampler_.GetOutputSamples(got));
+            usb_speaker_resampler_.Process(usb_pcm.data(), got, out_pcm.data());
+        } else {
+            out_pcm = std::move(usb_pcm);
+        }
+
+        if (!codec_->output_enabled()) {
+            codec_->EnableOutput(true);
+        }
+        codec_->OutputData(out_pcm);
+
+        last_output_time_ = std::chrono::steady_clock::now();
+        debug_statistics_.playback_count++;
+    }
+    usb_speaker_task_handle_ = nullptr;
+    vTaskDelete(NULL);
 }
 #endif

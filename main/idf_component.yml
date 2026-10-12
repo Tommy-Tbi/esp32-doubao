@@ -25,6 +25,12 @@ dependencies:
   espressif/esp_video: ==1.3.1  # for compatibility. update version may need to modify this project code.
   espressif/esp_image_effects: ^1.0.1  # 依赖 esp_imgfx_rotate/color_convert
 
+  ## USB 复合音频设备（USB Speaker + USB Microphone）
+  espressif/esp_tinyusb:
+    version: "^1.4.0"
+    rules:
+      - if: "target in [esp32s3, esp32c5, esp32c6, esp32p4]"
+
   ## 外设
   espressif/i2c_bus: ^1.5.0
   espressif/button: ~4.1.3

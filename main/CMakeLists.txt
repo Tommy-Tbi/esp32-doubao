@@ -38,7 +38,7 @@ set(SOURCES "audio/audio_codec.cc"
             )
 
 # Conditionally add USB audio source
-if(CONFIG_USB_MIC_MODE)
+if(CONFIG_USB_AUDIO_DEVICE)
     list(APPEND SOURCES "usb_audio.cc")
 endif()
 
@@ -942,4 +942,40 @@ if ("${size}" AND "${offset}")
     endif()
 else()
     message(STATUS "Assets partition not found, using v1 partition table")
+endif()
+
+# ---------------------------------------------------------------------------
+# USB 复合音频设备（USB Speaker + USB Microphone）
+#
+# esp_tinyusb 的 tusb_config.h 没有暴露音频类的 Kconfig 项，需要手动把
+# CFG_TUD_AUDIO* 宏同时注入 TinyUSB 库和本组件，保证两边结构体布局一致。
+# ---------------------------------------------------------------------------
+if(CONFIG_USB_AUDIO_DEVICE)
+    if(tinyusb IN_LIST BUILD_COMPONENTS)
+        set(TINYUSB_COMPONENT tinyusb)
+    else()
+        set(TINYUSB_COMPONENT espressif__tinyusb)
+    endif()
+    idf_component_get_property(TINYUSB_LIB ${TINYUSB_COMPONENT} COMPONENT_LIB)
+
+    set(USB_AUDIO_DEFS
+        CFG_TUD_AUDIO=1
+        CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE=48000
+        CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX=2
+        CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX=1
+        CFG_TUD_AUDIO_ENABLE_EP_IN=1
+        CFG_TUD_AUDIO_EP_SZ_IN=64
+        CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX=64
+        CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ=256
+        CFG_TUD_AUDIO_FUNC_2_EP_IN_SZ_MAX=64
+        CFG_TUD_AUDIO_FUNC_2_EP_IN_SW_BUF_SZ=256
+        CFG_TUD_AUDIO_ENABLE_EP_OUT=1
+        CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP=1
+        CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX=64
+        CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ=256
+        CFG_TUD_AUDIO_FUNC_2_EP_OUT_SZ_MAX=64
+        CFG_TUD_AUDIO_FUNC_2_EP_OUT_SW_BUF_SZ=256
+    )
+    target_compile_definitions(${TINYUSB_LIB} PUBLIC ${USB_AUDIO_DEFS})
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC ${USB_AUDIO_DEFS})
 endif()
