@@ -178,7 +178,7 @@ CONFIG_USB_AUDIO_MIC=y
 - 打开后 USB-OTG 独占内部 PHY，**同一原生 USB 口的 USB-Serial-JTAG 串口会消失**；调试需使用独立 UART 接口，并将控制台配置为 UART。
 - 采样率固定 48kHz、16bit、单声道；端点最大包长 98 字节（96 字节音频 + 一个样本余量）。音量由本地控制，不声明未实现的 USB 音量/静音控制。
 - Speaker/Mic 开关控制数据通路，USB 始终枚举两个接口；关闭 Mic 时输出静音。
-- 默认配置未开启 USB 音频；需要显式设置 `CONFIG_USB_AUDIO_DEVICE=y`。
+- `sdkconfig.defaults` 默认开启 USB 音箱和麦克风，开机进入 OTG 模式。已有本地 `sdkconfig` 不会被默认值覆盖，需要在 menuconfig 中开启 `USB_AUDIO_DEVICE`、`USB_AUDIO_SPEAKER` 和 `USB_AUDIO_MIC`。
 - 设备本地正在播 TTS 时，USB 音箱任务会主动让路，避免两路声音叠加。
 
 ### 从 OTG 音频模式恢复烧录
