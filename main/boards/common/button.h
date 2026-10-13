@@ -58,6 +58,17 @@ public:
     void OnRelease(std::function<void()> callback);
     void OnLongPress(std::function<void()> callback, uint32_t threshold_ms = 2000);
 
+    // 必须在所有 TouchButton 对象创建完成之后调用一次。
+    // ESP-IDF 要求 touch_element_start() 晚于所有 touch element 的创建，
+    // 否则 inited_channel_mask 仍为 0，start 返回 ESP_ERR_INVALID_STATE，
+    // 触摸扫描定时器不会启动，所有触摸键都没有任何事件。
+    // 另外阈值在 start 时按当时的基线计算（threshold = sens * 0.8 * baseline），
+    // 所以 StartAll() 还应放在所有外设初始化完成之后。
+    static void StartAll();
+
+    // 启动后延迟重新采样基线（外设稳定后重算阈值），可选调用
+    static void ReBaseline(uint32_t delay_ms = 3000);
+
 private:
     touch_button_handle_t touch_handle_ = nullptr;
     std::function<void()> on_press_;

@@ -2,6 +2,8 @@
 
 #include <button_gpio.h>
 #include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "touch_element/touch_button.h"
 
 #define TAG "Button"
@@ -139,9 +141,6 @@ TouchButton::TouchButton(int touch_pad, float sensitivity) {
         ESP_ERROR_CHECK(touch_button_install(&button_global_config));
         ESP_LOGI(TAG, "Touch button installed");
 
-        touch_element_start();
-        ESP_LOGI(TAG, "Touch element library started");
-
         touch_initialized = true;
     }
 
@@ -177,6 +176,34 @@ TouchButton::~TouchButton() {
     if (touch_handle_ != nullptr) {
         touch_button_delete(touch_handle_);
     }
+}
+
+void TouchButton::StartAll() {
+    static bool started = false;
+    if (started) {
+        return;
+    }
+    ESP_ERROR_CHECK(touch_element_start());
+    started = true;
+    ESP_LOGI(TAG, "Touch element library started");
+}
+
+void TouchButton::ReBaseline(uint32_t delay_ms) {
+    static bool scheduled = false;
+    if (scheduled) {
+        return;
+    }
+    scheduled = true;
+    xTaskCreate([](void* /*arg*/) {
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        if (touch_element_stop() == ESP_OK && touch_element_start() == ESP_OK) {
+            ESP_LOGI(TAG, "Touch baseline re-sampled, thresholds recalculated");
+        } else {
+            ESP_LOGE(TAG, "Touch baseline re-sample failed");
+        }
+        vTaskDelete(NULL);
+    }, "touch_rebase", 2048, nullptr, 3, nullptr);
+    (void)delay_ms;
 }
 
 void TouchButton::OnPress(std::function<void()> callback) {
