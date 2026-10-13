@@ -308,8 +308,9 @@ void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
     auto state = GetDeviceState();
 
-    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
-        // Network is ready, start activation
+    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring ||
+        (state == kDeviceStateIdle && !protocol_)) {
+        // Also initialize the protocol when WiFi arrives after offline startup.
         SetDeviceState(kDeviceStateActivating);
         if (activation_task_handle_ != nullptr) {
             ESP_LOGW(TAG, "Activation task already running");

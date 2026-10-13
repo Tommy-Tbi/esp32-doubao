@@ -122,6 +122,16 @@ private:
             // Add volume down logic
         });
 
+        // Provisioning is manual: hold touch button 2 for five seconds.
+        touch_buttons_[1].OnLongPress([this]() {
+            Application::GetInstance().Schedule([this]() {
+                auto state = Application::GetInstance().GetDeviceState();
+                if (state == kDeviceStateStarting || state == kDeviceStateIdle) {
+                    EnterWifiConfigMode();
+                }
+            });
+        }, 5000);
+
         // Touch button 3: Volume up
         touch_buttons_[2].OnPress([this]() {
             ESP_LOGI(TAG, "Touch button 3 pressed - Volume Up");

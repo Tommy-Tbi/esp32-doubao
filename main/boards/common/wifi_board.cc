@@ -87,7 +87,7 @@ void WifiBoard::StartNetwork() {
         }
     });
 
-    // Try to connect or enter config mode
+    // Connect saved credentials only; provisioning is explicitly user-triggered.
     TryWifiConnect();
 }
 
@@ -101,10 +101,14 @@ void WifiBoard::TryWifiConnect() {
         esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
         WifiManager::GetInstance().StartStation();
     } else {
-        // No SSID configured, enter config mode
-        // Wait for the board version to be shown
-        vTaskDelay(pdMS_TO_TICKS(1500));
-        StartWifiConfigMode();
+        ESP_LOGI(TAG, "No saved WiFi; staying offline (manual provisioning only)");
+        Application::GetInstance().Schedule([]() {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateStarting ||
+                app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+                app.SetDeviceState(kDeviceStateIdle);
+            }
+        });
     }
 }
 
@@ -156,11 +160,16 @@ void WifiBoard::SetNetworkEventCallback(NetworkEventCallback callback) {
 }
 
 void WifiBoard::OnWifiConnectTimeout(void* arg) {
-    auto* board = static_cast<WifiBoard*>(arg);
-    ESP_LOGW(TAG, "WiFi connection timeout, entering config mode");
-
-    WifiManager::GetInstance().StopStation();
-    board->StartWifiConfigMode();
+    (void)arg;
+    ESP_LOGW(TAG, "WiFi connection timeout; staying offline without provisioning");
+    // Leave the station running so saved networks can reconnect later.
+    // Do UI/state work on the application task, not the ESP timer task.
+    Application::GetInstance().Schedule([]() {
+        auto& app = Application::GetInstance();
+        if (app.GetDeviceState() == kDeviceStateStarting) {
+            app.SetDeviceState(kDeviceStateIdle);
+        }
+    });
 }
 
 void WifiBoard::SyncNtpTime() {

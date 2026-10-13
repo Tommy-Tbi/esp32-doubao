@@ -44,13 +44,15 @@ bool DeviceStateMachine::IsValidTransition(DeviceState from, DeviceState to) con
             return to == kDeviceStateStarting;
 
         case kDeviceStateStarting:
-            // Can go to wifi configuring or activating
+            // Offline startup can enter idle without provisioning/activation.
             return to == kDeviceStateWifiConfiguring ||
+                   to == kDeviceStateIdle ||
                    to == kDeviceStateActivating;
 
         case kDeviceStateWifiConfiguring:
-            // Can go to activating (after wifi connected) or audio testing
+            // Allow offline idle if provisioning exits without saved credentials.
             return to == kDeviceStateActivating ||
+                   to == kDeviceStateIdle ||
                    to == kDeviceStateAudioTesting;
 
         case kDeviceStateAudioTesting:

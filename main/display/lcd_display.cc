@@ -487,12 +487,12 @@ void LcdDisplay::SetupUI() {
     emoji_image_ = lv_img_create(screen);
     lv_obj_align(emoji_image_, LV_ALIGN_TOP_MID, 0, text_font->line_height + lvgl_theme->spacing(8));
 
-    // Display AI logo while booting
+    // Display a generic speaker icon while booting.
     emoji_label_ = lv_label_create(screen);
     lv_obj_center(emoji_label_);
     lv_obj_set_style_text_font(emoji_label_, large_icon_font, 0);
     lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
-    lv_label_set_text(emoji_label_, FONT_AWESOME_MICROCHIP_AI);
+    lv_label_set_text(emoji_label_, FONT_AWESOME_VOLUME_HIGH);
 }
 #if CONFIG_IDF_TARGET_ESP32P4
 #define  MAX_MESSAGES 40
@@ -840,7 +840,7 @@ void LcdDisplay::SetupUI() {
     emoji_label_ = lv_label_create(emoji_box_);
     lv_obj_set_style_text_font(emoji_label_, large_icon_font, 0);
     lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
-    lv_label_set_text(emoji_label_, FONT_AWESOME_MICROCHIP_AI);
+    lv_label_set_text(emoji_label_, FONT_AWESOME_VOLUME_HIGH);
 
     emoji_image_ = lv_img_create(emoji_box_);
     lv_obj_center(emoji_image_);
@@ -1016,6 +1016,15 @@ void LcdDisplay::SetEmotion(const char* emotion) {
     }
     
     if (emoji_image_ == nullptr) {
+        return;
+    }
+
+    // Keep the idle/default identity independent of downloaded emoji assets.
+    if (strcmp(emotion, "neutral") == 0 && emoji_label_ != nullptr) {
+        DisplayLockGuard lock(this);
+        lv_label_set_text(emoji_label_, FONT_AWESOME_VOLUME_HIGH);
+        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
         return;
     }
 
