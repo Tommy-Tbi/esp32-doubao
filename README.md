@@ -181,6 +181,34 @@ CONFIG_USB_AUDIO_MIC=y
 - `sdkconfig.defaults` 默认开启 USB 音箱和麦克风，开机进入 OTG 模式。已有本地 `sdkconfig` 不会被默认值覆盖，需要在 menuconfig 中开启 `USB_AUDIO_DEVICE`、`USB_AUDIO_SPEAKER` 和 `USB_AUDIO_MIC`。
 - 设备本地正在播 TTS 时，USB 音箱任务会主动让路，避免两路声音叠加。
 
+### 按键操作与退出 OTG 模式
+
+本设备只有 **2 个触摸键**（TOUCH_PAD_NUM1 / TOUCH_PAD_NUM2）。触摸键的创建与事件分发使用 `main/boards/common/button.cc` 中的 `TouchButton`（对应参考工程 `esp_sparkbot/example/factory_demo_v1` 的 `bsp_touch_button_create()`：touch_element + touch_button，阈值灵敏度分别为 0.04 / 0.1）。
+
+| 按键 | 作用 |
+| ---- | ---- |
+| 触摸键 1 | 空闲时开始对话；收音中停止收音；播报中打断播报 |
+| 触摸键 2 | 音量 -10，并显示「音量 xx%」 |
+| **触摸键 1 + 触摸键 2 同时按** | **退出 OTG 模式** |
+| BOOT (GPIO0) | 开始 / 停止对话，也可与触摸键组成组合键 |
+
+本项目不做 WiFi 配网：所有按键都不会进入配网模式，WiFi 信息使用 NVS 中已保存的配置。
+
+**同时按两个触摸键 => 退出 OTG 模式**（`ComboKeyDetector`，窗口 250ms）：
+
+- PC 接入 USB 后设备自动进入 OTG 模式（USB 音箱 + 麦克风），屏幕上显示常驻提示界面「OTG 模式运行中」。
+- 两个键同时按住（第二个键按下时第一个还按着），或在 250ms 内先后按下两个不同的键，会：调用 `UsbAudio::Stop()` 停止 USB 音频通路（麦克风不再上传、PC 音频不再从本地喇叭播出）→ 隐藏提示界面 → 状态栏清空 → 弹出「已退出 OTG 模式」，设备回到正常的语音对话模式。
+- 组合键生效期间会屏蔽单键动作（不会误触发音量/对话）。退出后需**重新插拔 USB** 才会再次进入 OTG 模式（`OtgMode::blocked_`）。
+
+相关文件：
+
+```
+main/boards/esp-sparkbot/sparkbot_keys.cc   组合键（同时按两个键）检测
+main/boards/esp-sparkbot/otg_mode.cc        OTG 模式进入/退出 + 屏幕提示界面
+main/boards/esp-sparkbot/config.h           触摸键通道与灵敏度配置
+main/usb_audio.cc                            USB 复合音频设备（多监听者连接回调）
+```
+
 ### 从 OTG 音频模式恢复烧录
 
 ESP-SPARKBOT 的 BOOT 键连接 GPIO0。通常不需要旧固件配合：
