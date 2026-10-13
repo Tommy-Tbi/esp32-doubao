@@ -29,11 +29,18 @@ Backlight::~Backlight() {
     }
 }
 
+// 屏幕亮度全局衰减系数（%）：用于在不改变用户设置值的前提下整体调暗屏幕。
+// 100 = 不衰减；50 = 减半；25 = 四分之一
+#define BRIGHTNESS_SCALE 25
+
 void Backlight::RestoreBrightness() {
     // Load brightness from settings
     Settings settings("display");  
     int saved_brightness = settings.GetInt("brightness", 75);
-    
+
+    // 应用全局衰减系数
+    saved_brightness = saved_brightness * BRIGHTNESS_SCALE / 100;
+
     // 检查亮度值是否为0或过小，设置默认值
     if (saved_brightness <= 0) {
         ESP_LOGW(TAG, "Brightness value (%d) is too small, setting to default (10)", saved_brightness);
