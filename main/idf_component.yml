@@ -29,7 +29,12 @@ dependencies:
   espressif/esp_tinyusb:
     version: "^1.4.0"
     rules:
-      - if: "target in [esp32s3, esp32c5, esp32c6, esp32p4]"
+      - if: "target == esp32s3"
+  # UAC2 callbacks and FIFO-based feedback used by main/usb_audio.cc.
+  espressif/tinyusb:
+    version: "~0.17.0"
+    rules:
+      - if: "target == esp32s3"
 
   ## 外设
   espressif/i2c_bus: ^1.5.0

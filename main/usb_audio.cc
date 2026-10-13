@@ -1,282 +1,239 @@
 #include "usb_audio.h"
 
 #include <string.h>
-
 #include <esp_log.h>
 #include <esp_err.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <freertos/ringbuf.h>
-
 #include "tinyusb.h"
 #include "tusb.h"
 
 #define TAG "UsbAudio"
 
-// ---------------------------------------------------------------------------
-// USB 复合音频设备描述符（UAC2）
-//
-//   func 0: Speaker  (IAD itf 0/1) - PC 播放 -> 设备喇叭，带反馈端点
-//   func 1: Microphone(IAD itf 2/3) - 设备麦克风 -> PC
-//
-// 全速模式，1ms 帧，端点最大包长 64 字节。
-// ---------------------------------------------------------------------------
-#define UAC_SAMPLE_RATE      48000
-#define UAC_SAMPLE_BITS      16
-#define UAC_EP_SIZE          64
-#define EPNUM_SPK_OUT        0x01
-#define EPNUM_SPK_FB_IN      0x81
-#define EPNUM_MIC_IN         0x82
+// Full-speed UAC2: two independent functions, each with AC + AS interfaces.
+// 48 samples/ms * 2 bytes, plus one sample of asynchronous clock tolerance.
+#define UAC_SAMPLE_RATE 48000
+#define UAC_EP_SIZE 98
+#define AUDIO_FUNC_SPEAKER 0
+#define AUDIO_FUNC_MIC 1
+#define ITF_SPK_AC 0
+#define ITF_SPK_AS 1
+#define ITF_MIC_AC 2
+#define ITF_MIC_AS 3
+#define EPNUM_SPK_OUT 0x01
+#define EPNUM_SPK_FB_IN 0x81
+#define EPNUM_MIC_IN 0x82
 
-#define ITF_SPK_AC           0
-#define ITF_SPK_AS           1
-#define ITF_MIC_AC           2
-#define ITF_MIC_AS           3
-#define ITF_NUM_TOTAL        4
+// Deliberately no Feature Unit: volume is controlled locally. Do not advertise
+// mute/volume/connector controls unless their class requests are implemented.
+#define AUDIO_COMMON_DESC(itf, category, input_type, output_type, stream_term, eps) \
+    TUD_AUDIO_DESC_IAD(itf, 2, 4), \
+    TUD_AUDIO_DESC_STD_AC(itf, 0, 4), \
+    TUD_AUDIO_DESC_CS_AC(0x0200, category, TUD_AUDIO_DESC_CLK_SRC_LEN + \
+        TUD_AUDIO_DESC_INPUT_TERM_LEN + TUD_AUDIO_DESC_OUTPUT_TERM_LEN, 0), \
+    TUD_AUDIO_DESC_CLK_SRC(4, AUDIO_CLOCK_SOURCE_ATT_INT_FIX_CLK, \
+        AUDIO_CTRL_R << AUDIO_CLOCK_SOURCE_CTRL_CLK_FRQ_POS, 0, 0), \
+    TUD_AUDIO_DESC_INPUT_TERM(1, input_type, 0, 4, 1, 0, 0, 0, 0), \
+    TUD_AUDIO_DESC_OUTPUT_TERM(3, output_type, 0, 1, 4, 0, 0), \
+    TUD_AUDIO_DESC_STD_AS_INT(itf + 1, 0, 0, 0), \
+    TUD_AUDIO_DESC_STD_AS_INT(itf + 1, 1, eps, 0), \
+    TUD_AUDIO_DESC_CS_AS_INT(stream_term, 0, AUDIO_FORMAT_TYPE_I, \
+        AUDIO_DATA_FORMAT_TYPE_I_PCM, 1, 0, 0), \
+    TUD_AUDIO_DESC_TYPE_I_FORMAT(2, 16)
 
-// tinyusb 音频函数号
-#define AUDIO_FUNC_SPEAKER   0
-#define AUDIO_FUNC_MIC       1
-
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_AUDIO20_SPEAKER_MONO_FB_DESC_LEN + \
-                          TUD_AUDIO20_MIC_ONE_CH_DESC_LEN)
-
-static tusb_desc_device_t const kDescDevice = {
+static const uint8_t kSpeakerDesc[] = {
+    AUDIO_COMMON_DESC(ITF_SPK_AC, AUDIO_FUNC_DESKTOP_SPEAKER,
+        AUDIO_TERM_TYPE_USB_STREAMING, AUDIO_TERM_TYPE_OUT_DESKTOP_SPEAKER, 1, 2),
+    TUD_AUDIO_DESC_STD_AS_ISO_EP(EPNUM_SPK_OUT,
+        TUSB_XFER_ISOCHRONOUS | TUSB_ISO_EP_ATT_ASYNCHRONOUS, UAC_EP_SIZE, 1),
+    TUD_AUDIO_DESC_CS_AS_ISO_EP(0, 0, 0, 0),
+    // UAC2 feedback uses 16.16 (4 bytes), including at full speed.
+    TUD_AUDIO_DESC_STD_AS_ISO_FB_EP(EPNUM_SPK_FB_IN, 4, 1),
+};
+static const uint8_t kMicDesc[] = {
+    AUDIO_COMMON_DESC(ITF_MIC_AC, AUDIO_FUNC_MICROPHONE,
+        AUDIO_TERM_TYPE_IN_GENERIC_MIC, AUDIO_TERM_TYPE_USB_STREAMING, 3, 1),
+    TUD_AUDIO_DESC_STD_AS_ISO_EP(EPNUM_MIC_IN,
+        TUSB_XFER_ISOCHRONOUS | TUSB_ISO_EP_ATT_ASYNCHRONOUS, UAC_EP_SIZE, 1),
+    TUD_AUDIO_DESC_CS_AS_ISO_EP(0, 0, 0, 0),
+};
+static_assert(sizeof(kSpeakerDesc) == CFG_TUD_AUDIO_FUNC_1_DESC_LEN);
+static_assert(sizeof(kMicDesc) == CFG_TUD_AUDIO_FUNC_2_DESC_LEN);
+static_assert(CFG_TUD_AUDIO == 2);
+static constexpr size_t kConfigLen = TUD_CONFIG_DESC_LEN + sizeof(kSpeakerDesc) + sizeof(kMicDesc);
+static uint8_t kDescConfig[kConfigLen] = {
+    TUD_CONFIG_DESCRIPTOR(1, 4, 0, kConfigLen, 0, 250),
+};
+static const tusb_desc_device_t kDescDevice = {
     .bLength = sizeof(tusb_desc_device_t),
     .bDescriptorType = TUSB_DESC_DEVICE,
     .bcdUSB = 0x0200,
-    // 音频类需要用 IAD 包裹（subclass = common, protocol = IAD）
     .bDeviceClass = TUSB_CLASS_MISC,
     .bDeviceSubClass = MISC_SUBCLASS_COMMON,
     .bDeviceProtocol = MISC_PROTOCOL_IAD,
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = 0x303A,
-    .idProduct = 0x4001 + (1 << 4),  // AUDIO bit，PC 会为该组合保存驱动
-    .bcdDevice = 0x0100,
-    .iManufacturer = 0x01,
-    .iProduct = 0x02,
-    .iSerialNumber = 0x03,
-    .bNumConfigurations = 0x01,
+    .idProduct = 0x4011,
+    .bcdDevice = 0x0101,
+    .iManufacturer = 1,
+    .iProduct = 2,
+    .iSerialNumber = 3,
+    .bNumConfigurations = 1,
 };
-
-static uint8_t const kDescConfig[] = {
-    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 250),
-
-    // --- USB Speaker (48kHz/16bit/mono, 带反馈端点) ---
-    TUD_AUDIO20_SPEAKER_MONO_FB_DESCRIPTOR(ITF_SPK_AC, 0x04,
-                                            UAC_SAMPLE_BITS / 8, UAC_SAMPLE_BITS,
-                                            EPNUM_SPK_OUT, UAC_EP_SIZE,
-                                            EPNUM_SPK_FB_IN, 0x03),
-
-    // --- USB Microphone (48kHz/16bit/mono) ---
-    TUD_AUDIO20_MIC_ONE_CH_DESCRIPTOR(ITF_MIC_AC, 0x04,
-                                      UAC_SAMPLE_BITS / 8, UAC_SAMPLE_BITS,
-                                      EPNUM_MIC_IN, UAC_EP_SIZE),
-};
-
-static char const* kStringDescArr[] = {
-    (const char[]){0x09, 0x04},   // 0: English (0x0409)
-    "ESP32-S3",                  // 1: Manufacturer
-    "ESP32-S3 USB Speaker+Mic",   // 2: Product
-    "0001",                      // 3: Serial
-    "UAC2 Speaker+Mic",          // 4: Audio Interface
+static const char kLanguage[] = {0x09, 0x04};
+static const char* kStrings[] = {
+    kLanguage, "ESP32-S3", "ESP32-S3 USB Speaker+Mic", "0001", "UAC2 Speaker+Mic",
 };
 
 extern "C" {
+void tud_mount_cb(void) { UsbAudio::GetInstance().OnMounted(); }
+void tud_umount_cb(void) { UsbAudio::GetInstance().OnUnmounted(); }
 
-// 设备/配置/字符串描述符通过 tinyusb_config_t 传给 esp_tinyusb，
-// 这里不需要（也不应该）再实现 tud_descriptor_*_cb，否则会重复定义。
+bool tud_audio_get_req_entity_cb(uint8_t rhport, const tusb_control_request_t* request) {
+    const uint8_t itf = request->wIndex & 0xff;
+    const uint8_t entity = request->wIndex >> 8;
+    const uint8_t selector = request->wValue >> 8;
+    if ((itf != ITF_SPK_AC && itf != ITF_MIC_AC) || entity != 4 ||
+        (request->wValue & 0xff) != 0) return false;
 
-void tud_mount_cb(void) {
-    UsbAudio::GetInstance().OnMounted();
-}
-
-void tud_umount_cb(void) {
-    UsbAudio::GetInstance().OnUnmounted();
-}
-
-// 音量/静音控制由本地 codec 处理，这里直接应答成功
-void tud_audio_set_volume(uint8_t rhport, uint8_t itfnum, int16_t min, int16_t max, int16_t cur) {
-    (void)rhport; (void)itfnum; (void)min; (void)max; (void)cur;
-}
-
-int16_t tud_audio_get_volume(uint8_t rhport, uint8_t itfnum) {
-    (void)rhport; (void)itfnum;
-    return 0;  // 0dB
-}
-
-void tud_audio_set_mute(uint8_t rhport, uint8_t itfnum, bool mute) {
-    (void)rhport; (void)itfnum; (void)mute;
-}
-
-bool tud_audio_get_mute(uint8_t rhport, uint8_t itfnum) {
-    (void)rhport; (void)itfnum;
+    if (selector == AUDIO_CS_CTRL_SAM_FREQ) {
+        if (request->bRequest == AUDIO_CS_REQ_CUR) {
+            uint32_t rate = UAC_SAMPLE_RATE;
+            return tud_audio_buffer_and_schedule_control_xfer(rhport, request, &rate, sizeof(rate));
+        }
+        if (request->bRequest == AUDIO_CS_REQ_RANGE) {
+            // One subrange: MIN=MAX=48000, RES=0 (little endian).
+            uint8_t range[] = {1, 0, 0x80, 0xbb, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+            return tud_audio_buffer_and_schedule_control_xfer(rhport, request, range, sizeof(range));
+        }
+    }
+    if (selector == AUDIO_CS_CTRL_CLK_VALID && request->bRequest == AUDIO_CS_REQ_CUR) {
+        uint8_t valid = 1;
+        return tud_audio_buffer_and_schedule_control_xfer(rhport, request, &valid, sizeof(valid));
+    }
     return false;
 }
 
+void tud_audio_feedback_params_cb(uint8_t, uint8_t, audio_feedback_params_t* params) {
+    // TinyUSB adjusts feedback from the speaker RX FIFO, independently of mic.
+    params->method = AUDIO_FEEDBACK_METHOD_FIFO_COUNT;
+    params->sample_freq = UAC_SAMPLE_RATE;
+}
+
+bool tud_audio_tx_done_pre_load_cb(uint8_t, uint8_t func, uint8_t, uint8_t alt) {
+    if (func == AUDIO_FUNC_MIC && alt != 0) UsbAudio::GetInstance().FeedMicrophone();
+    return true;
+}
+
+bool tud_audio_set_itf_cb(uint8_t, const tusb_control_request_t* request) {
+    if ((request->wIndex & 0xff) == ITF_MIC_AS) {
+        UsbAudio::GetInstance().OnMicrophoneInterface(request->wValue == 1);
+    }
+    return true;
+}
 }  // extern "C"
 
-// ---------------------------------------------------------------------------
 UsbAudio& UsbAudio::GetInstance() {
     static UsbAudio instance;
     return instance;
 }
 
 bool UsbAudio::Initialize(const Config& config) {
-    if (initialized_) {
-        return true;
+    if (initialized_) return true;
+    if (config.sample_rate != UAC_SAMPLE_RATE || config.channels != 1 || config.bits_per_sample != 16) {
+        ESP_LOGE(TAG, "USB descriptors require 48000 Hz / mono / 16 bit");
+        return false;
     }
     config_ = config;
-    ESP_LOGI(TAG, "USB audio: rate=%d ch=%d bits=%d speaker=%d mic=%d",
-             config_.sample_rate, config_.channels, config_.bits_per_sample,
-             config_.speaker_enabled, config_.mic_enabled);
-
     if (config_.mic_enabled) {
-        // 200ms 缓冲
-        size_t bytes = (size_t)config_.sample_rate * config_.channels * sizeof(int16_t) / 5;
-        mic_ringbuf_ = xRingbufferCreate(bytes, RINGBUF_TYPE_BYTEBUF);
-        if (mic_ringbuf_ == nullptr) {
-            ESP_LOGE(TAG, "mic ringbuf alloc failed (%u)", (unsigned)bytes);
-            return false;
-        }
+        mic_ringbuf_ = xRingbufferCreate(UAC_SAMPLE_RATE * sizeof(int16_t) / 5, RINGBUF_TYPE_BYTEBUF);
+        if (!mic_ringbuf_) return false;
     }
-
+    memcpy(kDescConfig + TUD_CONFIG_DESC_LEN, kSpeakerDesc, sizeof(kSpeakerDesc));
+    memcpy(kDescConfig + TUD_CONFIG_DESC_LEN + sizeof(kSpeakerDesc), kMicDesc, sizeof(kMicDesc));
     const tinyusb_config_t tusb_config = {
         .device_descriptor = &kDescDevice,
-        .string_descriptor = kStringDescArr,
-        .string_descriptor_count = sizeof(kStringDescArr) / sizeof(kStringDescArr[0]),
+        .string_descriptor = kStrings,
+        .string_descriptor_count = sizeof(kStrings) / sizeof(kStrings[0]),
         .external_phy = false,
         .configuration_descriptor = kDescConfig,
         .self_powered = false,
         .vbus_monitor_io = -1,
     };
-    if (tinyusb_driver_install(&tusb_config) != ESP_OK) {
-        ESP_LOGE(TAG, "tinyusb_driver_install failed");
+    running_ = true;  // Callbacks can run as soon as the driver starts.
+    const esp_err_t err = tinyusb_driver_install(&tusb_config);
+    if (err != ESP_OK) {
+        running_ = false;
+        if (mic_ringbuf_) vRingbufferDelete((RingbufHandle_t)mic_ringbuf_);
+        mic_ringbuf_ = nullptr;
+        ESP_LOGE(TAG, "tinyusb_driver_install: %s", esp_err_to_name(err));
         return false;
     }
-
-    if (config_.mic_enabled) {
-        xTaskCreatePinnedToCore(MicFeedTaskEntry, "usb_mic_tx", 3072, this, 6, (TaskHandle_t*)&mic_task_handle_, 0);
-    }
-
     initialized_ = true;
-    running_ = true;
-    ESP_LOGI(TAG, "USB audio device initialized (speaker+mic)");
+    ESP_LOGI(TAG, "USB audio initialized; native USB Serial/JTAG shares this PHY");
     return true;
 }
 
-void UsbAudio::Start() {
-    running_ = true;
-}
-
-void UsbAudio::Stop() {
-    running_ = false;
-    OnUnmounted();
-}
+void UsbAudio::Start() { if (initialized_) running_ = true; }
+void UsbAudio::Stop() { running_ = false; }
 
 bool UsbAudio::SendMicrophoneData(const int16_t* pcm, size_t samples) {
-    if (!running_ || mic_ringbuf_ == nullptr || samples == 0) {
-        return false;
-    }
-    RingbufHandle_t rb = (RingbufHandle_t)mic_ringbuf_;
-    size_t bytes = samples * sizeof(int16_t);
-    if (xRingbufferGetCurFreeSize(rb) < bytes) {
-        // 缓冲满：丢最旧数据，保证实时性
-        size_t item_size = 0;
-        uint8_t* item = (uint8_t*)xRingbufferReceiveUpTo(rb, &item_size, 0, bytes);
-        if (item != nullptr) {
-            vRingbufferReturnItem(rb, item);
+    if (!running_ || !connected_ || !mic_streaming_ || !mic_ringbuf_ || !pcm || !samples) return false;
+    return xRingbufferSend((RingbufHandle_t)mic_ringbuf_, pcm, samples * sizeof(int16_t), 0) == pdTRUE;
+}
+
+void UsbAudio::OnMicrophoneInterface(bool active) {
+    mic_streaming_ = false;
+    if (mic_ringbuf_) {
+        size_t bytes;
+        void* item;
+        while ((item = xRingbufferReceive((RingbufHandle_t)mic_ringbuf_, &bytes, 0)) != nullptr) {
+            vRingbufferReturnItem((RingbufHandle_t)mic_ringbuf_, item);
         }
     }
-    return xRingbufferSend(rb, pcm, bytes, 0) == pdTRUE;
+    mic_streaming_ = active;
+}
+
+void UsbAudio::FeedMicrophone() {
+    // Called by the USB task once per IN transfer, not by an unrelated RTOS timer.
+    // Pad underruns with silence; never clear the FIFO immediately after writing.
+    uint8_t frame[96] = {};
+    size_t copied = 0;
+    if (running_ && mic_ringbuf_) {
+        while (copied < sizeof(frame)) {
+            size_t bytes = 0;
+            void* item = xRingbufferReceiveUpTo((RingbufHandle_t)mic_ringbuf_, &bytes, 0, sizeof(frame) - copied);
+            if (!item) break;
+            memcpy(frame + copied, item, bytes);
+            copied += bytes;
+            vRingbufferReturnItem((RingbufHandle_t)mic_ringbuf_, item);
+        }
+    }
+    tud_audio_n_write(AUDIO_FUNC_MIC, frame, sizeof(frame));
 }
 
 size_t UsbAudio::AvailableSpeakerSamples() const {
-    if (!initialized_ || !config_.speaker_enabled || !connected_) {
-        return 0;
-    }
+    if (!initialized_ || !config_.speaker_enabled || !connected_ || !running_) return 0;
     return tud_audio_n_available(AUDIO_FUNC_SPEAKER) / sizeof(int16_t);
 }
 
 size_t UsbAudio::FetchSpeakerData(int16_t* out, size_t max_samples) {
-    if (max_samples == 0) {
-        return 0;
-    }
-    if (max_samples > UINT16_MAX / sizeof(int16_t)) {
-        max_samples = UINT16_MAX / sizeof(int16_t);
-    }
-    uint16_t want = (uint16_t)(max_samples * sizeof(int16_t));
-    uint16_t got = tud_audio_n_read(AUDIO_FUNC_SPEAKER, out, want);
-    return got / sizeof(int16_t);
-}
-
-void UsbAudio::MicFeedTaskEntry(void* arg) {
-    static_cast<UsbAudio*>(arg)->MicFeedTask();
-}
-
-void UsbAudio::MicFeedTask() {
-    RingbufHandle_t rb = (RingbufHandle_t)mic_ringbuf_;
-    int16_t chunk[64];
-    uint32_t fb_counter = 0;
-
-    while (running_) {
-        if (!connected_) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-
-        size_t item_size = 0;
-        uint8_t* item = (uint8_t*)xRingbufferReceiveUpTo(rb, &item_size, 0, sizeof(chunk));
-        if (item != nullptr) {
-            tud_audio_n_write(AUDIO_FUNC_MIC, item, (uint16_t)item_size);
-            vRingbufferReturnItem(rb, item);
-            tud_audio_n_clear_ep_in_ff(AUDIO_FUNC_MIC);
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
-
-        // Speaker 反馈通道：16ms 一次
-        if (++fb_counter >= 16) {
-            fb_counter = 0;
-            UpdateSpeakerFeedback();
-        }
-    }
-
-    mic_task_handle_ = nullptr;
-    vTaskDelete(NULL);
-}
-
-void UsbAudio::UpdateSpeakerFeedback() {
-    if (!connected_ || !config_.speaker_enabled) {
-        return;
-    }
-    // 反馈值为 16.16 定点（全速模式下驱动内部再转成 10.14）：
-    // Ff = 每个 1ms 帧的样本数 = sample_rate / 1000
-    uint32_t fb = (uint32_t)(config_.sample_rate / 1000) << 16;
-    tud_audio_n_fb_set(AUDIO_FUNC_SPEAKER, fb);
+    if (!out || !max_samples || !AvailableSpeakerSamples()) return 0;
+    if (max_samples > UINT16_MAX / sizeof(int16_t)) max_samples = UINT16_MAX / sizeof(int16_t);
+    return tud_audio_n_read(AUDIO_FUNC_SPEAKER, out, max_samples * sizeof(int16_t)) / sizeof(int16_t);
 }
 
 void UsbAudio::OnMounted() {
-    if (!connected_) {
-        connected_ = true;
-        ESP_LOGI(TAG, "USB host connected");
-        UpdateSpeakerFeedback();
-        if (connection_callback_) {
-            connection_callback_(true);
-        }
-    }
+    connected_ = true;
+    ESP_LOGI(TAG, "USB host connected");
+    if (connection_callback_) connection_callback_(true);
 }
-
 void UsbAudio::OnUnmounted() {
-    if (connected_) {
-        connected_ = false;
-        ESP_LOGI(TAG, "USB host disconnected");
-        if (connection_callback_) {
-            connection_callback_(false);
-        }
-    }
+    connected_ = false;
+    mic_streaming_ = false;
+    ESP_LOGI(TAG, "USB host disconnected");
+    if (connection_callback_) connection_callback_(false);
 }
-
 void UsbAudio::SetConnectionCallback(std::function<void(bool)> callback) {
     connection_callback_ = callback;
 }

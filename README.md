@@ -175,9 +175,28 @@ CONFIG_USB_AUDIO_MIC=y
 ### 说明
 
 - 基于 TinyUSB 的 UAC2 设备类（`espressif/esp_tinyusb`，会在构建时自动拉取）。
-- 打开后占用内部 USB PHY（USB-OTG），日志仍走 USB-Serial-JTAG / UART 不受影响。
-- 采样率固定 48kHz、16bit；设备侧 codec 为单声道，USB 立体声会自动下混。
+- 打开后 USB-OTG 独占内部 PHY，**同一原生 USB 口的 USB-Serial-JTAG 串口会消失**；调试需使用独立 UART 接口，并将控制台配置为 UART。
+- 采样率固定 48kHz、16bit、单声道；端点最大包长 98 字节（96 字节音频 + 一个样本余量）。音量由本地控制，不声明未实现的 USB 音量/静音控制。
+- Speaker/Mic 开关控制数据通路，USB 始终枚举两个接口；关闭 Mic 时输出静音。
+- 默认配置未开启 USB 音频；需要显式设置 `CONFIG_USB_AUDIO_DEVICE=y`。
 - 设备本地正在播 TTS 时，USB 音箱任务会主动让路，避免两路声音叠加。
+
+### 从 OTG 音频模式恢复烧录
+
+ESP-SPARKBOT 的 BOOT 键连接 GPIO0。通常不需要旧固件配合：
+
+1. 按住 **BOOT**。
+2. 按一下 **RESET/EN**；没有复位键时，保持 BOOT 按下并断电重新上电。
+3. 松开 BOOT，等待电脑重新识别 ROM 下载接口，重新选择实际出现的 COM 端口烧录。
+4. 烧录完成后正常复位，应用启用 USB 音频时该 COM 口会再次消失。
+
+使用连接 ESP32-S3 原生 USB（GPIO19=D-、GPIO20=D+）的数据口，不是仅供电接口。
+上述方式以未通过 eFuse 禁用 USB/ROM 下载且启动绑带满足芯片要求为前提；
+若板子另有 USB-UART 桥，也可经 UART0 配合 BOOT/RESET 烧录。
+
+当前代码没有“软件切回烧录”的命令或按键处理；`UsbAudio::Stop()` 只暂停音频，
+不会释放 PHY，也不会进入 ROM 下载。普通重启会再次运行应用、重新启用 OTG，
+因此不能替代上述 BOOT + 硬件复位操作。
 
 ## 已修复问题
 

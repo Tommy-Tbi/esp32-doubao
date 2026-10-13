@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <functional>
+#include <atomic>
 
 // USB Audio Device：USB 复合音频设备（USB Speaker + USB Microphone）
 //
@@ -52,8 +53,8 @@ public:
     // ---- 供 tinyusb 回调调用 ----
     void OnMounted();
     void OnUnmounted();
-    // Speaker 反馈通道（16ms 周期的时钟反馈）
-    void UpdateSpeakerFeedback();
+    void FeedMicrophone();
+    void OnMicrophoneInterface(bool active);
 
 private:
     UsbAudio() = default;
@@ -61,17 +62,13 @@ private:
     UsbAudio(const UsbAudio&) = delete;
     UsbAudio& operator=(const UsbAudio&) = delete;
 
-    static void MicFeedTaskEntry(void* arg);
-
-    void MicFeedTask();
-
     bool initialized_ = false;
-    bool running_ = false;
-    volatile bool connected_ = false;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> connected_{false};
+    std::atomic<bool> mic_streaming_{false};
     Config config_;
 
     void* mic_ringbuf_ = nullptr;  // FreeRTOS RingbufHandle_t，设备麦克风待发数据
-    void* mic_task_handle_ = nullptr;
 
     std::function<void(bool)> connection_callback_;
 };
