@@ -40,6 +40,8 @@ set(SOURCES "audio/audio_codec.cc"
 # Conditionally add USB audio source
 if(CONFIG_USB_AUDIO_DEVICE)
     list(APPEND SOURCES "usb_audio.cc")
+    # CDC-only fallback for runtime "OTG -> JTAG" switch
+    list(APPEND SOURCES "usb_cdc.cc")
 endif()
 
 # Conditionally add Douyin voice protocol
@@ -593,6 +595,15 @@ file(GLOB BOARD_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_TYPE}/*.c
 )
 list(APPEND SOURCES ${BOARD_SOURCES})
+
+# SparkBot: ADC 电阻分压按键/组合键 与 OTG 模式。显式列出，
+# 保证新增文件后即使 cmake 未重新执行 glob 也能编译到。
+if(BOARD_TYPE STREQUAL "esp-sparkbot")
+    list(APPEND SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/esp-sparkbot/sparkbot_keys.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/esp-sparkbot/otg_mode.cc)
+    list(REMOVE_DUPLICATES SOURCES)
+endif()
 
 # Select audio processor according to Kconfig
 if(CONFIG_USE_AUDIO_PROCESSOR)

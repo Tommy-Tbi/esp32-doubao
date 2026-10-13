@@ -5,12 +5,19 @@
 #include "button.h"
 #include "config.h"
 #include "settings.h"
+#include "sparkbot_keys.h"
+#include "otg_mode.h"
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
+#include <esp_system.h>
+#include <nvs_flash.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
 #include <driver/uart.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <algorithm>
 #include <cstring>
 
 #include "esp32_camera.h"
@@ -43,7 +50,8 @@ class EspSparkBot : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
     Button boot_button_;
-    TouchButton touch_buttons_[TOUCH_BUTTON_NUM];
+    TouchButton* touch_buttons_[TOUCH_BUTTON_NUM] = {nullptr, nullptr, nullptr};
+    ComboKeyDetector combo_keys_;  // 同时按两个按键的组合键检测
     Display* display_;
     Esp32Camera* camera_;
     light_mode_t light_mode_ = LIGHT_MODE_ALWAYS_ON;
@@ -76,66 +84,163 @@ private:
         ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
     }
 
-    void InitializeButtons() {
-        // Boot button: toggle chat state (connect/disconnect)
-        boot_button_.OnClick([this]() {
-            auto& app = Application::GetInstance();
-            auto state = app.GetDeviceState();
+    // 开始/停止对话（boot 按键与 PLAY 按键共用）
+    void ToggleChat() {
+        auto& app = Application::GetInstance();
+        auto state = app.GetDeviceState();
 
-            if (state == kDeviceStateStarting) {
-                EnterWifiConfigMode();
+        if (state == kDeviceStateStarting) {
+            // 本项目不做配网：开机/连接中不做任何处理
+            ESP_LOGI(TAG, "button: ignored while starting");
+            return;
+        }
+
+        if (state == kDeviceStateIdle) {
+            ESP_LOGI(TAG, "button: starting chat");
+            app.StartListening();
+        } else {
+            ESP_LOGI(TAG, "button: stopping chat");
+            app.StopListening();
+        }
+    }
+
+    void ChangeVolume(int delta) {
+        auto* codec = GetAudioCodec();
+        int volume = std::clamp(codec->output_volume() + delta, 0, 100);
+        codec->SetOutputVolume(volume);
+
+        char text[32];
+        snprintf(text, sizeof(text), "音量 %d%%", volume);
+        if (display_) {
+            display_->ShowNotification(text, 1500);
+        }
+    }
+
+    // 面板按键引脚：TOUCH_PAD_NUM1 / TOUCH_PAD_NUM2（touch_element，内部电容通道）
+    // 详见 config.h 中对本机实际走线的说明
+    void InitializeKeys() {
+        (void)0;  // touch_buttons_ 在成员初始化列表中已创建
+    }
+
+    void InitializeButtons() {
+        // ------------------------------------------------------------------
+        // 组合键：同时按下任意两个按键 => 退出 OTG 模式
+        // ------------------------------------------------------------------
+        combo_keys_.SetWindowMs(500);  // 放宽到 500ms
+        combo_keys_.OnCombo([this](uint32_t mask) {
+            ESP_LOGI(TAG, "combo %s pressed", ComboKeyDetector::Describe(mask).c_str());
+            if (display_) {
+                char text[64];
+                snprintf(text, sizeof(text), "组合键: %s", ComboKeyDetector::Describe(mask).c_str());
+                display_->ShowNotification(text, 2000);
+            }
+            OtgMode::GetInstance().ExitByKeys(mask);
+        });
+
+        // Boot button: toggle chat state (connect/disconnect)
+        boot_button_.OnPressDown([this]() {
+            combo_keys_.PressDown(COMBO_KEY_BOOT);
+        });
+        boot_button_.OnPressUp([this]() {
+            combo_keys_.PressUp(COMBO_KEY_BOOT);
+        });
+        boot_button_.OnClick([this]() {
+            if (combo_keys_.IsComboActive()) {
+                return;  // 组合键期间不执行单键动作
+            }
+            ToggleChat();
+        });
+        // BOOT 长按 5 秒（由构造函数设置）：清除 OTG 禁用标志 + 重启，下次启动会重新进入 OTG 模式
+        boot_button_.OnLongPress([this]() {
+            if (combo_keys_.IsComboActive()) {
                 return;
             }
-
-            // Toggle chat: connect if idle, disconnect if active
-            if (state == kDeviceStateIdle) {
-                ESP_LOGI(TAG, "Boot button: starting chat");
-                app.StartListening();
-            } else {
-                ESP_LOGI(TAG, "Boot button: stopping chat");
-                app.StopListening();
+            nvs_handle_t h;
+            if (nvs_open("otg", NVS_READWRITE, &h) == ESP_OK) {
+                nvs_erase_key(h, "disabled");
+                nvs_commit(h);
+                nvs_close(h);
             }
+            if (display_) {
+                display_->ShowNotification("OTG 重新启用，3 秒后重启…", 3000);
+            }
+            ESP_LOGW(TAG, "BOOT long press: re-enable OTG, restarting…");
+            for (volatile int i = 0; i < 20000000; i++) { asm volatile("nop"); }
+            esp_restart();
         });
 
-        // Touch button 1: press to start/stop conversation
-        touch_buttons_[0].OnPress([this]() {
+        // ------------------------------------------------------------------
+        // 触摸键（本设备 2 个）：触摸键 1 对话，触摸键 2 音量减
+        // 两个触摸键同时按下（组合键）=> 退出 OTG 模式
+        // ------------------------------------------------------------------
+        // Touch button 1: 开始/停止对话
+        touch_buttons_[0]->OnPress([this]() {
+            combo_keys_.PressDown(COMBO_KEY_1);
+            if (combo_keys_.IsComboActive()) {
+                return;
+            }
             auto& app = Application::GetInstance();
             auto state = app.GetDeviceState();
+            ESP_LOGI(TAG, "Touch button 1 (pad 1) pressed, state=%d", state);
+            if (display_) display_->ShowNotification("PAD1 触发: 对话", 1500);
 
-            ESP_LOGI(TAG, "Touch button 1 pressed, state=%d", state);
-
-            if (state == kDeviceStateIdle) {
-                // Start conversation
-                app.StartListening();
-            } else if (state == kDeviceStateListening) {
-                // Stop sending audio for this turn
-                app.StopListening();
-            } else if (state == kDeviceStateSpeaking) {
-                // Interrupt current TTS playback
-                app.AbortSpeaking(kAbortReasonNone);
+            char text[48];
+            switch (state) {
+                case kDeviceStateIdle:
+                    snprintf(text, sizeof(text), "对话：开始");
+                    app.StartListening();
+                    break;
+                case kDeviceStateListening:
+                    snprintf(text, sizeof(text), "对话：停止收音");
+                    app.StopListening();
+                    break;
+                case kDeviceStateSpeaking:
+                    snprintf(text, sizeof(text), "对话：打断播报");
+                    app.AbortSpeaking(kAbortReasonNone);
+                    break;
+                default:
+                    snprintf(text, sizeof(text), "对话：当前状态 %d", (int)state);
+                    break;
+            }
+            if (display_) {
+                display_->ShowNotification(text, 1500);
             }
         });
-
-        // Touch button 2: Volume down
-        touch_buttons_[1].OnPress([this]() {
-            ESP_LOGI(TAG, "Touch button 2 pressed - Volume Down");
-            // Add volume down logic
+        touch_buttons_[0]->OnRelease([this]() {
+            combo_keys_.PressUp(COMBO_KEY_1);
         });
 
-        // Provisioning is manual: hold touch button 2 for five seconds.
-        touch_buttons_[1].OnLongPress([this]() {
-            Application::GetInstance().Schedule([this]() {
-                auto state = Application::GetInstance().GetDeviceState();
-                if (state == kDeviceStateStarting || state == kDeviceStateIdle) {
-                    EnterWifiConfigMode();
-                }
-            });
-        }, 5000);
+        // 同时在串口打印 PAD1 状态（设备没有串口，PDR1 在屏幕上看到响应）
+        ESP_LOGI(TAG, "Touch button 1 (pad 1) handler registered");
+        ESP_LOGI(TAG, "Touch button 2 (pad 2) handler registered");
+        ESP_LOGI(TAG, "Touch button 3 (pad 3) handler registered");
 
-        // Touch button 3: Volume up
-        touch_buttons_[2].OnPress([this]() {
-            ESP_LOGI(TAG, "Touch button 3 pressed - Volume Up");
-            // Add volume up logic
+        // Touch button 2: 音量 -10
+        touch_buttons_[1]->OnPress([this]() {
+            combo_keys_.PressDown(COMBO_KEY_2);
+            if (combo_keys_.IsComboActive()) {
+                return;
+            }
+            ESP_LOGI(TAG, "Touch button 2 (pad 2) pressed - Volume Down");
+            if (display_) display_->ShowNotification("PAD2 触发: 音量 -10", 1500);
+            ChangeVolume(-10);
+        });
+        touch_buttons_[1]->OnRelease([this]() {
+            combo_keys_.PressUp(COMBO_KEY_2);
+        });
+
+        // Touch button 3: 音量 +10
+        touch_buttons_[2]->OnPress([this]() {
+            combo_keys_.PressDown(COMBO_KEY_3);
+            if (combo_keys_.IsComboActive()) {
+                return;
+            }
+            ESP_LOGI(TAG, "Touch button 3 (pad 3) pressed - Volume Up");
+            if (display_) display_->ShowNotification("PAD3 触发: 音量 +10", 1500);
+            ChangeVolume(10);
+        });
+        touch_buttons_[2]->OnRelease([this]() {
+            combo_keys_.PressUp(COMBO_KEY_3);
         });
     }
 
@@ -261,19 +366,25 @@ private:
     }
 
 public:
-    EspSparkBot() : boot_button_(BOOT_BUTTON_GPIO),
-                    touch_buttons_{
-                        TouchButton(TOUCH_BUTTON_PAD_1, TOUCH_BUTTON_SENSITIVITY_1),
-                        TouchButton(TOUCH_BUTTON_PAD_2, TOUCH_BUTTON_SENSITIVITY_2),
-                        TouchButton(TOUCH_BUTTON_PAD_3, TOUCH_BUTTON_SENSITIVITY_3)
-                    } {
+    EspSparkBot() : boot_button_(BOOT_BUTTON_GPIO, false, 5000, 0) {
+        touch_buttons_[0] = new TouchButton(TOUCH_BUTTON_PAD_1, TOUCH_BUTTON_SENSITIVITY_1);
+        touch_buttons_[1] = new TouchButton(TOUCH_BUTTON_PAD_2, TOUCH_BUTTON_SENSITIVITY_2);
+        touch_buttons_[2] = new TouchButton(TOUCH_BUTTON_PAD_3, TOUCH_BUTTON_SENSITIVITY_3);
         InitializeI2c();
         InitializeSpi();
         InitializeDisplay();
+        // 先确定按键引脚与极性，再注册回调
+        InitializeKeys();
         InitializeButtons();
         InitializeCamera();
         InitializeEchoUart();
         InitializeTools();
+        // 所有 TouchButton 已创建、所有外设已初始化完成，再启动 touch element
+        // （IDF 要求 touch_element_start() 晚于 element 创建）
+        TouchButton::StartAll();
+        // TouchButton::ReBaseline();  // 临时关掉，看触摸键 1 是否恢复
+        // USB(OTG) 模式管理：USB 接入自动进入，同时按两个按键退出
+        OtgMode::GetInstance().Begin(display_);
         GetBacklight()->RestoreBrightness();
     }
 

@@ -25,13 +25,16 @@
 #define VOLUME_DOWN_BUTTON_GPIO GPIO_NUM_NC
 
 // Touch button configuration
+// 灵敏度参考 esp_sparkbot/example/factory_demo_v1；在本机实测：0.08 稳定有效
+// 重要：不要启用 TOUCH_PAD_NUM4（= GPIO4），它是 I2C SDA 引脚，与音频 codec 冲突
+// 顶部那 2 个键可能根本没接到 ESP32 内部触摸通道，需要看子板原理图
 #define TOUCH_BUTTON_NUM         3
-#define TOUCH_BUTTON_PAD_1       TOUCH_PAD_NUM1  // GPIO1
-#define TOUCH_BUTTON_PAD_2       TOUCH_PAD_NUM2  // GPIO2
-#define TOUCH_BUTTON_PAD_3       TOUCH_PAD_NUM3  // GPIO3
-#define TOUCH_BUTTON_SENSITIVITY_1 0.04F
-#define TOUCH_BUTTON_SENSITIVITY_2 0.1F
-#define TOUCH_BUTTON_SENSITIVITY_3 0.1F
+#define TOUCH_BUTTON_PAD_1       TOUCH_PAD_NUM1
+#define TOUCH_BUTTON_PAD_2       TOUCH_PAD_NUM2
+#define TOUCH_BUTTON_PAD_3       TOUCH_PAD_NUM3
+#define TOUCH_BUTTON_SENSITIVITY_1 0.08F
+#define TOUCH_BUTTON_SENSITIVITY_2 0.08F
+#define TOUCH_BUTTON_SENSITIVITY_3 0.08F
 
 #define DISPLAY_WIDTH   240
 #define DISPLAY_HEIGHT  240

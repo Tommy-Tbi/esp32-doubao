@@ -177,12 +177,27 @@ bool UsbAudio::Initialize(const Config& config) {
 void UsbAudio::Start() { if (initialized_) running_ = true; }
 void UsbAudio::Stop() { running_ = false; }
 
+void UsbAudio::Uninstall() {
+    if (!initialized_) return;
+    running_ = false;
+    connected_ = false;
+    mic_streaming_ = false;
+    tinyusb_driver_uninstall();
+    if (mic_ringbuf_) {
+        vRingbufferDelete((RingbufHandle_t)mic_ringbuf_);
+        mic_ringbuf_ = nullptr;
+    }
+    initialized_ = false;
+    ESP_LOGI(TAG, "USB audio uninstalled");
+}
+
 bool UsbAudio::SendMicrophoneData(const int16_t* pcm, size_t samples) {
     if (!running_ || !connected_ || !mic_streaming_ || !mic_ringbuf_ || !pcm || !samples) return false;
     return xRingbufferSend((RingbufHandle_t)mic_ringbuf_, pcm, samples * sizeof(int16_t), 0) == pdTRUE;
 }
 
 void UsbAudio::OnMicrophoneInterface(bool active) {
+    if (!initialized_) return;
     mic_streaming_ = false;
     if (mic_ringbuf_) {
         size_t bytes;
@@ -224,16 +239,36 @@ size_t UsbAudio::FetchSpeakerData(int16_t* out, size_t max_samples) {
 }
 
 void UsbAudio::OnMounted() {
+    if (!initialized_) return;  // UsbAudio 未初始化时（CDC 模式）忽略
     connected_ = true;
     ESP_LOGI(TAG, "USB host connected");
-    if (connection_callback_) connection_callback_(true);
+    NotifyConnection(true);
 }
 void UsbAudio::OnUnmounted() {
+    if (!initialized_) return;
     connected_ = false;
     mic_streaming_ = false;
     ESP_LOGI(TAG, "USB host disconnected");
-    if (connection_callback_) connection_callback_(false);
+    NotifyConnection(false);
 }
+void UsbAudio::NotifyConnection(bool connected) {
+    std::vector<std::function<void(bool)>> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        callbacks = connection_callbacks_;
+    }
+    for (auto& callback : callbacks) {
+        callback(connected);
+    }
+}
+
 void UsbAudio::SetConnectionCallback(std::function<void(bool)> callback) {
-    connection_callback_ = callback;
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    connection_callbacks_.clear();
+    connection_callbacks_.push_back(std::move(callback));
+}
+
+void UsbAudio::AddConnectionCallback(std::function<void(bool)> callback) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    connection_callbacks_.push_back(std::move(callback));
 }

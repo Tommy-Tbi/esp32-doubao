@@ -1,6 +1,17 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#include <nvs_flash.h>
+
+// 运行时检查 NVS 标志 otg/disabled：1 = 上次退出 OTG 后重启，不初始化 USB Audio
+static bool OtgDisabledByNvs() {
+    nvs_handle_t h;
+    if (nvs_open("otg", NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t v = 0;
+    esp_err_t err = nvs_get_u8(h, "disabled", &v);
+    nvs_close(h);
+    return err == ESP_OK && v == 1;
+}
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "processors/afe_audio_processor.h"
@@ -67,36 +78,42 @@ void AudioService::Initialize(AudioCodec* codec) {
         }
     });
 
+// 检查 NVS 运行时标志：otg_disabled=1 时不初始化 USB Audio
 #if CONFIG_USB_AUDIO_DEVICE
-    // Initialize USB Audio composite device (speaker + mic)
-    UsbAudio::Config usb_config = {
-        .sample_rate = 48000,
-        .channels = 1,
-        .bits_per_sample = 16,
+    const bool kOtgDisabledAtBoot = OtgDisabledByNvs();
+    if (kOtgDisabledAtBoot) {
+        ESP_LOGI("OtgMode", "OTG disabled by NVS, skipping USB audio init");
+    } else {
+        // Initialize USB Audio composite device (speaker + mic)
+        UsbAudio::Config usb_config = {
+            .sample_rate = 48000,
+            .channels = 1,
+            .bits_per_sample = 16,
 #if CONFIG_USB_AUDIO_SPEAKER
-        .speaker_enabled = true,
+            .speaker_enabled = true,
 #else
-        .speaker_enabled = false,
+            .speaker_enabled = false,
 #endif
 #if CONFIG_USB_AUDIO_MIC
-        .mic_enabled = true,
+            .mic_enabled = true,
 #else
-        .mic_enabled = false,
+            .mic_enabled = false,
 #endif
-    };
-    if (UsbAudio::GetInstance().Initialize(usb_config)) {
-        UsbAudio::GetInstance().SetConnectionCallback([](bool connected) {
-            ESP_LOGI(TAG, "USB audio %s", connected ? "connected (speaker+mic)" : "disconnected");
-        });
-        // 输出侧重采样器：codec 输出采样率 -> USB 采样率
-        if (codec_->output_sample_rate() != usb_config.sample_rate) {
-            usb_speaker_resampler_.Configure(usb_config.sample_rate, codec_->output_sample_rate());
+        };
+        if (UsbAudio::GetInstance().Initialize(usb_config)) {
+            UsbAudio::GetInstance().AddConnectionCallback([](bool connected) {
+                ESP_LOGI(TAG, "USB audio %s", connected ? "connected (speaker+mic)" : "disconnected");
+            });
+            // 输出侧重采样器：codec 输出采样率 -> USB 采样率
+            if (codec_->output_sample_rate() != usb_config.sample_rate) {
+                usb_speaker_resampler_.Configure(usb_config.sample_rate, codec_->output_sample_rate());
+            }
+            // 输入侧重采样器：codec 输入采样率 -> USB 采样率
+            if (codec_->input_sample_rate() != usb_config.sample_rate) {
+                usb_input_resampler_.Configure(codec_->input_sample_rate(), usb_config.sample_rate);
+            }
         }
-        // 输入侧重采样器：codec 输入采样率 -> USB 采样率
-        if (codec_->input_sample_rate() != usb_config.sample_rate) {
-            usb_input_resampler_.Configure(codec_->input_sample_rate(), usb_config.sample_rate);
-        }
-    }
+    }  // !kOtgDisabledAtBoot
 #endif
 
     esp_timer_create_args_t audio_power_timer_args = {

@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <functional>
 #include <atomic>
+#include <mutex>
+#include <vector>
 
 // USB Audio Device：USB 复合音频设备（USB Speaker + USB Microphone）
 //
@@ -30,6 +32,7 @@ public:
 
     void Start();
     void Stop();
+    void Uninstall();
 
     bool IsInitialized() const { return initialized_; }
     bool IsConnected() const { return connected_; }  // 已挂载到主机
@@ -49,6 +52,8 @@ public:
     size_t FetchSpeakerData(int16_t* out, size_t max_samples);
 
     void SetConnectionCallback(std::function<void(bool)> callback);
+    // 追加一个连接状态监听者（SetConnectionCallback 会清掉已有的监听者）
+    void AddConnectionCallback(std::function<void(bool)> callback);
 
     // ---- 供 tinyusb 回调调用 ----
     void OnMounted();
@@ -62,6 +67,8 @@ private:
     UsbAudio(const UsbAudio&) = delete;
     UsbAudio& operator=(const UsbAudio&) = delete;
 
+    void NotifyConnection(bool connected);
+
     bool initialized_ = false;
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};
@@ -70,5 +77,6 @@ private:
 
     void* mic_ringbuf_ = nullptr;  // FreeRTOS RingbufHandle_t，设备麦克风待发数据
 
-    std::function<void(bool)> connection_callback_;
+    std::mutex callback_mutex_;
+    std::vector<std::function<void(bool)>> connection_callbacks_;
 };
