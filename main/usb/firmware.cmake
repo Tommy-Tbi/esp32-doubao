@@ -33,13 +33,3 @@ idf_component_register(
 )
 
 include("${FIRMWARE_USB_DIR}/audio_config.cmake")
-
-# The UI uses the built-in font; no assistant assets/model partition is needed.
-idf_build_get_property(PROJECT_APP_BIN APP_BIN)
-add_custom_target(package_firmware ALL
-    COMMAND ${PYTHON} ${PROJECT_DIR}/scripts/package_firmware.py -b ${CMAKE_BINARY_DIR}
-    DEPENDS ${APP_BIN}
-    COMMENT "Packaging standalone USB firmware"
-    VERBATIM
-)
-add_dependencies(package_firmware app)

@@ -962,23 +962,6 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# 打包：编译后把 bootloader / partition-table / ota_data / app / assets
-# 收集到 build/flash/，并生成合并固件 firmware.bin + 一键烧写脚本。
-# ---------------------------------------------------------------------------
-find_package(Python3 COMPONENTS Interpreter)
-idf_build_get_property(PROJECT_APP_BIN APP_BIN)
-add_custom_target(package_firmware ALL
-    COMMAND ${PYTHON} ${PROJECT_DIR}/scripts/package_firmware.py
-            -b ${CMAKE_BINARY_DIR}
-    DEPENDS
-        ${APP_BIN}
-        ${GENERATED_ASSETS_LOCAL_FILE}
-    COMMENT "Packaging firmware into ${CMAKE_BINARY_DIR}/flash"
-    VERBATIM
-)
-add_dependencies(package_firmware app)
-
-# ---------------------------------------------------------------------------
 # USB 复合音频设备（USB Speaker + USB Microphone）
 #
 # esp_tinyusb 的 tusb_config.h 没有暴露音频类的 Kconfig 项，需要手动把

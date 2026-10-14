@@ -41,7 +41,33 @@
 
 ## 构建
 
-使用 **ESP-IDF ≥5.4** 和 ESP32-S3 工具链：
+使用 **ESP-IDF ≥5.4**、ESP32-S3 工具链、CMake 和 Ninja。在已加载 ESP-IDF 环境的终端中运行，工作目录为项目根目录；不能单独配置 `main/usb/`。
+
+### 直接使用 CMake
+
+```sh
+# 使用独立构建目录和 sdkconfig，避免沿用旧的 HID_COUNT=0 等配置。
+# $PWD 为项目根目录，以下写法适用于 Bash / PowerShell。
+cmake -S . -B build-cmake -G Ninja -DIDF_TARGET=esp32s3 -DSDKCONFIG="$PWD/build-cmake/sdkconfig" -DSDKCONFIG_DEFAULTS="$PWD/sdkconfig.defaults"
+
+# 编译
+cmake --build build-cmake
+
+# 修改 Kconfig 配置（修改后重新编译）
+cmake --build build-cmake --target menuconfig
+```
+
+源码/CMake 文件修改后可重新运行配置命令，再编译。`sdkconfig.defaults` 只提供默认值；已有 `build-cmake/sdkconfig` 不会被默认值全部覆盖。原生编译产物位于 `build-cmake/`，不再自动合并固件或生成烧录包。
+
+烧录可使用 ESP-IDF 工具，指定同一构建目录：
+
+```sh
+idf.py -B build-cmake -p <PORT> flash
+```
+
+以上直接 CMake 流程尚未完成实际配置、固件编译和板端验收。
+
+### 使用 idf.py（备选）
 
 ```sh
 idf.py set-target esp32s3
@@ -56,7 +82,7 @@ idf.py -p <PORT> flash
 - `USB_AUDIO_DEVICE` 自动选择 `TINYUSB_NO_DEFAULT_TASK`。应用管理 USB 任务并等待其协作退出，避免在持有 TinyUSB 内部锁时强行删除任务。
 - 确认 `USB_AUDIO_SPEAKER=y`、`USB_AUDIO_MIC=y`、`TINYUSB_HID_ENABLED=y`、`TINYUSB_HID_COUNT=1`。已有本地 `sdkconfig` 不会被 `sdkconfig.defaults` 全部覆盖，应在 menuconfig 中检查。
 - 沿用原有 16MB 分区布局以保持 NVS 地址；旧 assets/model 分区不再参与此固件运行，也不需要刷新。
-- 编译后由 `scripts/package_firmware.py` 输出 `build/flash/` 烧录包。
+- 编译仅生成 ESP-IDF 原生应用、bootloader 和分区表等产物，不自动合并 `firmware.bin` 或生成 `build/flash/` 烧录包。可使用 `idf.py -p <PORT> flash` 烧录。
 
 ### 日志接口与硬件注意事项
 
