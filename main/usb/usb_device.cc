@@ -131,10 +131,8 @@ public:
         lv_obj_align(status_, LV_ALIGN_TOP_RIGHT, -16, 14);
         lv_obj_set_style_text_color(status_, lv_color_hex(kAccent), 0);
         lv_label_set_text(status_, "USB 音频");
-        body_ = label(LV_ALIGN_CENTER, 0);
-        lv_label_set_text(body_, "音箱 + 麦克风\n连接电脑即可使用");
-        lv_obj_add_flag(body_, LV_OBJ_FLAG_HIDDEN);
-        InitializeAudioPanel(screen);
+        InitializeContentPanel(screen);
+        InitializeAudioPanel();
         footer_ = label(LV_ALIGN_BOTTOM_MID, -8);
         lv_obj_set_style_text_color(footer_, lv_color_hex(kMuted), 0);
         lv_obj_set_style_text_font(footer_, &font_puhui_14_1, 0);
@@ -151,14 +149,37 @@ public:
         DisplayLockGuard lock(this);
         lv_label_set_text(status_, text && text[0] ? text : "USB 音频");
         const bool audio = !text || !text[0] || std::strcmp(text, "USB 音频") == 0;
-        if (audio) {
-            lv_obj_remove_flag(audio_panel_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(body_, LV_OBJ_FLAG_HIDDEN);
+        if (audio != audio_view_) {
+            // One content tree: destroy the previous view, never cover it.
+            lv_obj_clean(audio_panel_);
+            body_ = volume_label_ = volume_bar_ = mute_slash_ = nullptr;
+            mic_label_ = mic_dot_ = mic_pill_ = nullptr;
+            for (auto& wave : waves_) wave = nullptr;
+            displayed_volume_ = displayed_mic_ = -1;
+            audio_view_ = audio;
+            if (audio) {
+                InitializeAudioPanel();
+            } else {
+                body_ = lv_label_create(audio_panel_);
+                lv_obj_set_width(body_, 188);
+                lv_obj_set_style_text_font(body_, &font_puhui_14_1, 0);
+                lv_obj_set_style_text_align(body_, LV_TEXT_ALIGN_CENTER, 0);
+                lv_obj_set_style_text_line_space(body_, 8, 0);
+                lv_label_set_long_mode(body_, LV_LABEL_LONG_WRAP);
+                lv_obj_center(body_);
+            }
+        }
+        if (!audio) {
+            const bool debug = std::strcmp(text, "USB 调试") == 0;
+            const bool error = std::strcmp(text, "USB 异常") == 0;
+            lv_label_set_text(body_, debug ?
+                "原生 Serial/JTAG\n左右键同按 3 秒\n返回 USB 音频" : error ?
+                "USB 初始化失败\n已停止切换以防冲突\n按 RESET 复位设备" :
+                "正在交接 USB 接口\n电脑将自动重新识别\n无需拔线或重启");
+            lv_obj_set_style_text_color(status_,
+                lv_color_hex(error ? kWarning : kAccent), 0);
         } else {
-            lv_obj_add_flag(audio_panel_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(body_, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(body_, std::strcmp(text, "USB 调试") == 0 ?
-                "原生 Serial/JTAG\n左右键同按 3 秒\n返回 USB 音频" : "");
+            lv_obj_set_style_text_color(status_, lv_color_hex(kAccent), 0);
         }
     }
 
@@ -173,6 +194,7 @@ public:
     void UpdateAudioState(int volume, bool mic_in_use) {
         volume = std::clamp(volume, 0, 100);
         DisplayLockGuard lock(this);
+        if (!audio_view_) return;
         if (volume != displayed_volume_) {
             displayed_volume_ = volume;
             char text[16];
@@ -206,7 +228,7 @@ protected:
     void Unlock() override { lvgl_port_unlock(); }
 
 private:
-    void InitializeAudioPanel(lv_obj_t* screen) {
+    void InitializeContentPanel(lv_obj_t* screen) {
         audio_panel_ = lv_obj_create(screen);
         lv_obj_set_size(audio_panel_, 216, 166);
         // Fixed 240x240 layout: header, audio card, then a separate notice area.
@@ -218,7 +240,9 @@ private:
         lv_obj_set_style_border_width(audio_panel_, 1, 0);
         lv_obj_set_style_border_color(audio_panel_, lv_color_hex(kBorder), 0);
         lv_obj_set_style_radius(audio_panel_, 20, 0);
+    }
 
+    void InitializeAudioPanel() {
         auto* icon = lv_obj_create(audio_panel_);
         lv_obj_set_size(icon, 76, 60);
         lv_obj_align(icon, LV_ALIGN_TOP_LEFT, 12, 25);
@@ -293,6 +317,7 @@ private:
         lv_obj_align(mic_dot_, LV_ALIGN_LEFT_MID, 18, 0);
     }
 
+    bool audio_view_ = true;  // Protected by the LVGL display lock.
     lv_obj_t* audio_panel_ = nullptr;
     lv_obj_t* volume_label_ = nullptr;
     lv_obj_t* volume_bar_ = nullptr;

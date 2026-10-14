@@ -187,36 +187,19 @@ int main() {
     assert(codec.output == std::vector<int16_t>(480, 0));  // detach mid-fetch
     usb.on_fetch = {};
 
-    // Audio uses the live base dashboard, never a covering static overlay.
-    mode.ShowOverlay(OtgMode::PanelState::Audio);
-    assert(!mode.overlay_ ||
-           (static_cast<lv_obj_t*>(mode.overlay_)->flags & LV_OBJ_FLAG_HIDDEN));
-    // Transient UI: one reusable column tree and state-specific copy.
-    mode.ShowOverlay(OtgMode::PanelState::ToNative);
-    auto* panel = static_cast<lv_obj_t*>(mode.overlay_);
-    assert(panel->flow == LV_FLEX_FLOW_COLUMN);
-    assert(static_cast<lv_obj_t*>(mode.title_)->text == "切换到调试模式");
-    int count = created_objects;
-    mode.ShowOverlay(OtgMode::PanelState::ToNative);
-    assert(created_objects == count);
-    mode.ShowOverlay(OtgMode::PanelState::ToNative);
-    assert(static_cast<lv_obj_t*>(mode.title_)->text == "切换到调试模式");
-    mode.ShowOverlay(OtgMode::PanelState::ToAudio);
-    assert(static_cast<lv_obj_t*>(mode.title_)->text == "切换到音频模式");
-    mode.ShowOverlay(OtgMode::PanelState::Error);
-    assert(static_cast<lv_obj_t*>(mode.hint_)->text.find("RESET") != std::string::npos);
-    assert(created_objects == count);
-    mode.HideOverlay();
-    assert(panel->flags & LV_OBJ_FLAG_HIDDEN);
-    mode.ShowOverlay(OtgMode::PanelState::Audio);
-    assert(panel->flags & LV_OBJ_FLAG_HIDDEN);
-    mode.ShowOverlay(OtgMode::PanelState::ToAudio);
-    assert(!(panel->flags & LV_OBJ_FLAG_HIDDEN));
-    lv_event_t event{panel->user_data};
-    panel->on_delete(&event);
-    assert(!mode.overlay_ && !mode.title_ && !mode.hint_);
-    mode.ShowOverlay(OtgMode::PanelState::ToNative);
-    assert(mode.overlay_ && created_objects == count + 5);
+    // The mode manager sends state only; UsbDisplay owns the single view.
+    mode.SetUsbStatus("USB 音频");
+    assert(display.status == "USB 音频");
+    mode.SetUsbStatus("切换到调试模式");
+    assert(display.status == "切换到调试模式");
+    mode.SetUsbStatus("切换到音频模式");
+    assert(display.status == "切换到音频模式");
+    mode.SetUsbStatus("USB 异常");
+    assert(display.status == "USB 异常");
+    mode.SetUsbStatus("USB 调试");
+    assert(display.status == "USB 调试");
+    mode.SetUsbStatus("");
+    assert(display.status.empty());
 
     // Duplicate status refreshes must not erase the live result notification.
     mode.status_text_ = nullptr;
@@ -243,6 +226,11 @@ def main():
     firmware = (ROOT / "main/usb/firmware.cmake").read_text(encoding="utf-8")
     for forbidden in ("application.cc", "audio_service.cc", "protocols/", "wake_words/"):
         assert forbidden not in firmware, f"assistant source in USB-only build: {forbidden}"
+    mode_source = (ROOT / "main/boards/esp-sparkbot/otg_mode.cc").read_text(encoding="utf-8")
+    assert "lv_" not in mode_source, "mode manager must not create a second UI"
+    ui_source = (ROOT / "main/usb/usb_device.cc").read_text(encoding="utf-8")
+    assert "lv_obj_clean(audio_panel_)" in ui_source
+    assert "if (!audio_view_) return;" in ui_source
     out = ROOT / ".tmp" / "usb_hot_switch_test"
     out.mkdir(parents=True, exist_ok=True)
     for name in ("esp_log.h", "lvgl.h", "nvs_flash.h", "usb_audio.h", "display.h",

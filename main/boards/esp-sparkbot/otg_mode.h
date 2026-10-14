@@ -26,10 +26,7 @@ private:
     const char* SwitchMode();
     void OnUsbConnection(bool connected);
     void Enter();
-    enum class PanelState { Hidden, Audio, ToNative, ToAudio, Error };
-    void ShowOverlay(PanelState state);
     void SetUsbStatus(const char* text);
-    void HideOverlay();
 
     Display* display_ = nullptr;
     TaskHandle_t task_ = nullptr;
@@ -39,12 +36,6 @@ private:
     std::atomic<bool> switching_{false};
     bool faulted_ = false;  // Worker only; incomplete teardown requires reset.
     const char* status_text_ = nullptr;  // Worker only; avoid clearing live notices
-    PanelState panel_state_ = PanelState::Hidden;  // Protected by DisplayLockGuard
-    void* overlay_ = nullptr;
-    void* badge_ = nullptr;
-    void* title_ = nullptr;
-    void* detail_ = nullptr;
-    void* hint_ = nullptr;
 };
 
 #endif

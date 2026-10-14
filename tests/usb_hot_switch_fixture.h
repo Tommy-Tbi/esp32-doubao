@@ -86,48 +86,6 @@ struct Display {
     void SetStatus(const char* s) { status = s; notice.clear(); ++status_updates; }
     void ShowNotification(const char* s, int) { notice = s; }
 };
-struct DisplayLockGuard { explicit DisplayLockGuard(Display*) {} };
-struct lv_event_t { void* user_data; };
-struct lv_obj_t {
-    std::string text;
-    int flags = 0, flow = 0;
-    void (*on_delete)(lv_event_t*) = nullptr;
-    void* user_data = nullptr;
-};
-inline int created_objects = 0;
-#define LV_FONT_DECLARE(name) inline int name = 0
-constexpr int LV_OBJ_FLAG_SCROLLABLE = 1, LV_SIZE_CONTENT = 0,
-    LV_OPA_COVER = 255, LV_TEXT_ALIGN_CENTER = 0, LV_OBJ_FLAG_HIDDEN = 2,
-    LV_OBJ_FLAG_CLICKABLE = 4, LV_OBJ_FLAG_IGNORE_LAYOUT = 8,
-    LV_FLEX_FLOW_COLUMN = 1, LV_FLEX_ALIGN_START = 0,
-    LV_FLEX_ALIGN_CENTER = 1, LV_OPA_20 = 51, LV_LABEL_LONG_WRAP = 0, LV_EVENT_DELETE = 1;
-#define LV_PCT(x) (x)
-inline lv_obj_t* lv_scr_act() { static lv_obj_t obj; return &obj; }
-inline lv_obj_t* lv_obj_create(lv_obj_t*) { ++created_objects; return new lv_obj_t; }
-inline lv_obj_t* lv_label_create(lv_obj_t* p) { return lv_obj_create(p); }
-inline void lv_obj_set_flex_flow(lv_obj_t* p, int flow) { p->flow = flow; }
-inline void lv_label_set_text(lv_obj_t* p, const char* text) { p->text = text; }
-inline void lv_obj_add_flag(lv_obj_t* p, int flag) { p->flags |= flag; }
-inline void lv_obj_clear_flag(lv_obj_t* p, int flag) { p->flags &= ~flag; }
-inline void lv_obj_remove_flag(lv_obj_t* p, int flag) { lv_obj_clear_flag(p, flag); }
-inline void lv_obj_add_event_cb(lv_obj_t* p, void (*cb)(lv_event_t*), int, void* data) {
-    p->on_delete = cb; p->user_data = data;
-}
-inline void* lv_event_get_user_data(lv_event_t* e) { return e->user_data; }
-inline int lv_color_hex(int v) { return v; }
-#define LV_VOID(name) template<class... T> inline void name(T...) {}
-LV_VOID(lv_obj_set_size) LV_VOID(lv_obj_center)
-LV_VOID(lv_obj_set_style_text_font)
-LV_VOID(lv_obj_set_flex_align) LV_VOID(lv_obj_set_style_pad_row)
-LV_VOID(lv_obj_set_style_shadow_width) LV_VOID(lv_obj_set_style_shadow_opa)
-LV_VOID(lv_obj_set_style_shadow_color) LV_VOID(lv_obj_set_height)
-LV_VOID(lv_label_set_long_mode) LV_VOID(lv_obj_set_style_text_line_space)
-LV_VOID(lv_obj_set_style_bg_opa) LV_VOID(lv_obj_set_style_bg_color)
-LV_VOID(lv_obj_set_style_radius) LV_VOID(lv_obj_set_style_border_width)
-LV_VOID(lv_obj_set_style_border_color) LV_VOID(lv_obj_set_style_pad_all)
-LV_VOID(lv_obj_set_width) LV_VOID(lv_obj_set_style_text_align)
-LV_VOID(lv_obj_set_style_text_color) LV_VOID(lv_obj_move_foreground)
-
 struct AudioCodec {
     int input_rate = 48000, output_rate = 48000, channels = 1;
     int starts = 0, reads = 0, writes = 0;
