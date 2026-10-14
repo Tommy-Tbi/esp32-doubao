@@ -27,12 +27,15 @@ public:
         bool mic_enabled = true;      // USB Microphone (device -> host)
     };
 
-    // 初始化 USB 设备栈（内部会启动 TinyUSB 任务）
-    bool Initialize(const Config& config);
+    // 配置只在首次调用时保存。enable=false 仅准备配置，不占用 PHY；
+    // enable=true 安装设备栈并启动可协作退出的 USB 任务。
+    bool Initialize(const Config& config, bool enable = true);
+    // Reinstall using the immutable configuration prepared at boot.
+    bool Resume();
 
     void Start();
     void Stop();
-    void Uninstall();
+    bool Uninstall();
 
     bool IsInitialized() const { return initialized_; }
     bool IsConnected() const { return connected_; }  // 已挂载到主机
@@ -68,13 +71,22 @@ private:
     UsbAudio& operator=(const UsbAudio&) = delete;
 
     void NotifyConnection(bool connected);
+    bool StartUsbTask();
+    void StopUsbTask();
 
-    bool initialized_ = false;
+    std::atomic<bool> initialized_{false};
+    bool configured_ = false;
+    // Application I/O is excluded while the USB task/PHY is being destroyed.
+    // TinyUSB callbacks never take this mutex (uninstall waits for that task).
+    mutable std::mutex io_mutex_;
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};
     std::atomic<bool> mic_streaming_{false};
     Config config_;
 
+    bool task_running_ = false;  // Accessed only by the lifecycle owner
+    std::atomic<bool> task_stop_{false};
+    void* task_done_ = nullptr;  // FreeRTOS binary semaphore
     void* mic_ringbuf_ = nullptr;  // FreeRTOS RingbufHandle_t，设备麦克风待发数据
 
     std::mutex callback_mutex_;

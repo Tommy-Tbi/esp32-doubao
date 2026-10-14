@@ -831,6 +831,7 @@ config USB_AUDIO_DEVICE
     bool "USB Audio Device (Speaker + Microphone)"
     default n
     depends on IDF_TARGET_ESP32S3
+    select TINYUSB_NO_DEFAULT_TASK
     help
         将设备作为一个 USB 复合音频设备连接到 PC：
           - USB Speaker    : PC 播放的音频由设备本地扬声器播出
@@ -838,7 +839,9 @@ config USB_AUDIO_DEVICE
         需要 ESP-IDF 的 esp_tinyusb 组件（会由组件管理器自动拉取）。
 
         打开后 USB-OTG 独占内部 PHY，原生 USB-Serial-JTAG 串口不可同时使用。
-        调试请使用独立 UART。按住 BOOT(GPIO0) 再复位可回到 ROM 下载模式。
+        SparkBot 可通过组合键或 BOOT 长按在音频和原生 Serial/JTAG 间热切换。
+        音频模式调试请使用独立 UART。按住 BOOT(GPIO0) 再复位可回到 ROM 下载模式。
+        使用应用管理的 TinyUSB 任务，以便切换时协作退出并安全释放资源。
 
     if USB_AUDIO_DEVICE
 

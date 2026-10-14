@@ -1,17 +1,6 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
-#include <nvs_flash.h>
-
-// 运行时检查 NVS 标志 otg/disabled：1 = 上次退出 OTG 后重启，不初始化 USB Audio
-static bool OtgDisabledByNvs() {
-    nvs_handle_t h;
-    if (nvs_open("otg", NVS_READONLY, &h) != ESP_OK) return false;
-    uint8_t v = 0;
-    esp_err_t err = nvs_get_u8(h, "disabled", &v);
-    nvs_close(h);
-    return err == ESP_OK && v == 1;
-}
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "processors/afe_audio_processor.h"
@@ -78,13 +67,10 @@ void AudioService::Initialize(AudioCodec* codec) {
         }
     });
 
-// 检查 NVS 运行时标志：otg_disabled=1 时不初始化 USB Audio
 #if CONFIG_USB_AUDIO_DEVICE
-    const bool kOtgDisabledAtBoot = OtgDisabledByNvs();
-    if (kOtgDisabledAtBoot) {
-        ESP_LOGI("OtgMode", "OTG disabled by NVS, skipping USB audio init");
-    } else {
-        // Initialize USB Audio composite device (speaker + mic)
+    // Prepare audio configuration and resamplers in both modes. The SparkBot
+    // mode worker owns all install/uninstall operations on the same CPU core.
+    {
         UsbAudio::Config usb_config = {
             .sample_rate = 48000,
             .channels = 1,
@@ -100,7 +86,12 @@ void AudioService::Initialize(AudioCodec* codec) {
             .mic_enabled = false,
 #endif
         };
-        if (UsbAudio::GetInstance().Initialize(usb_config)) {
+#if CONFIG_BOARD_TYPE_ESP_SPARKBOT
+        constexpr bool kStartUsbImmediately = false;
+#else
+        constexpr bool kStartUsbImmediately = true;
+#endif
+        if (UsbAudio::GetInstance().Initialize(usb_config, kStartUsbImmediately)) {
             UsbAudio::GetInstance().AddConnectionCallback([](bool connected) {
                 ESP_LOGI(TAG, "USB audio %s", connected ? "connected (speaker+mic)" : "disconnected");
             });
@@ -113,7 +104,7 @@ void AudioService::Initialize(AudioCodec* codec) {
                 usb_input_resampler_.Configure(codec_->input_sample_rate(), usb_config.sample_rate);
             }
         }
-    }  // !kOtgDisabledAtBoot
+    }
 #endif
 
     esp_timer_create_args_t audio_power_timer_args = {
@@ -860,7 +851,7 @@ void AudioService::UsbSpeakerTask() {
         // USB 端点每次只给几十字节，这里攒够 10ms 再播放，避免频繁写 codec
         std::vector<int16_t> usb_pcm(block_samples * channels);
         size_t got = 0;
-        while (got < usb_pcm.size() && !service_stopped_) {
+        while (got < usb_pcm.size() && !service_stopped_ && usb.IsConnected()) {
             size_t n = usb.FetchSpeakerData(usb_pcm.data() + got, usb_pcm.size() - got);
             if (n == 0) {
                 vTaskDelay(pdMS_TO_TICKS(1));
@@ -868,9 +859,10 @@ void AudioService::UsbSpeakerTask() {
             }
             got += n;
         }
-        if (got == 0) {
-            continue;
+        if (got == 0 || !usb.IsConnected()) {
+            continue;  // Discard a partial block across a detach/mode switch.
         }
+        usb_pcm.resize(got);
 
         // USB 立体声 -> codec 单声道（下混）
         if (channels > codec_->output_channels()) {

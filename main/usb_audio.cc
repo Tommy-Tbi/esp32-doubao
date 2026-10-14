@@ -5,10 +5,21 @@
 #include <esp_err.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/ringbuf.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 #include "tinyusb.h"
 #include "tusb.h"
 
 #define TAG "UsbAudio"
+
+// esp_tinyusb 1.x silently skips stack teardown with older TinyUSB builds.
+// Such builds cannot safely reinstall the DWC2 driver after a PHY handoff.
+#ifndef tusb_teardown
+#error "USB hot switching requires Espressif TinyUSB with tusb_teardown support"
+#endif
+#if !CONFIG_TINYUSB_NO_DEFAULT_TASK || CONFIG_TINYUSB_INIT_IN_DEFAULT_TASK
+#error "Hot switching requires CONFIG_TINYUSB_NO_DEFAULT_TASK=y and CONFIG_TINYUSB_INIT_IN_DEFAULT_TASK=n"
+#endif
 
 // Full-speed UAC2: two independent functions, each with AC + AS interfaces.
 // 48 samples/ms * 2 bytes, plus one sample of asynchronous clock tolerance.
@@ -138,13 +149,18 @@ UsbAudio& UsbAudio::GetInstance() {
     return instance;
 }
 
-bool UsbAudio::Initialize(const Config& config) {
+bool UsbAudio::Initialize(const Config& config, bool enable) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
     if (initialized_) return true;
     if (config.sample_rate != UAC_SAMPLE_RATE || config.channels != 1 || config.bits_per_sample != 16) {
         ESP_LOGE(TAG, "USB descriptors require 48000 Hz / mono / 16 bit");
         return false;
     }
-    config_ = config;
+    if (!configured_) {
+        config_ = config;
+        configured_ = true;
+    }
+    if (!enable) return true;
     if (config_.mic_enabled) {
         mic_ringbuf_ = xRingbufferCreate(UAC_SAMPLE_RATE * sizeof(int16_t) / 5, RINGBUF_TYPE_BYTEBUF);
         if (!mic_ringbuf_) return false;
@@ -160,38 +176,91 @@ bool UsbAudio::Initialize(const Config& config) {
         .self_powered = false,
         .vbus_monitor_io = -1,
     };
-    running_ = true;  // Callbacks can run as soon as the driver starts.
+    running_ = true;
+    initialized_ = true;  // Mount callbacks can run before install returns.
     const esp_err_t err = tinyusb_driver_install(&tusb_config);
     if (err != ESP_OK) {
+        initialized_ = false;
         running_ = false;
         if (mic_ringbuf_) vRingbufferDelete((RingbufHandle_t)mic_ringbuf_);
         mic_ringbuf_ = nullptr;
         ESP_LOGE(TAG, "tinyusb_driver_install: %s", esp_err_to_name(err));
         return false;
     }
-    initialized_ = true;
+    if (!StartUsbTask()) {
+        running_ = false;
+        connected_ = false;
+        if (tinyusb_driver_uninstall() == ESP_OK) {
+            initialized_ = false;
+            if (mic_ringbuf_) vRingbufferDelete((RingbufHandle_t)mic_ringbuf_);
+            mic_ringbuf_ = nullptr;
+        }
+        return false;
+    }
     ESP_LOGI(TAG, "USB audio initialized; native USB Serial/JTAG shares this PHY");
     return true;
+}
+
+bool UsbAudio::StartUsbTask() {
+    if (!task_done_) task_done_ = xSemaphoreCreateBinary();
+    if (!task_done_) return false;
+    task_stop_ = false;
+    // Unlike esp_tinyusb 1.x's default task, this task is joined cooperatively.
+    // Never delete a task while it owns TinyUSB FIFO/callback mutexes.
+    task_running_ = xTaskCreatePinnedToCore([](void* arg) {
+        auto* self = static_cast<UsbAudio*>(arg);
+        while (!self->task_stop_.load()) tud_task_ext(10, false);
+        xSemaphoreGive((SemaphoreHandle_t)self->task_done_);
+        vTaskDelete(nullptr);
+    }, "usb_audio", 4096, this, 5, nullptr, 0) == pdPASS;
+    return task_running_;
+}
+
+void UsbAudio::StopUsbTask() {
+    if (!task_running_) return;
+    task_stop_ = true;
+    xSemaphoreTake((SemaphoreHandle_t)task_done_, portMAX_DELAY);
+    task_running_ = false;
+}
+
+bool UsbAudio::Resume() {
+    // Configuration is set once by AudioService before the mode worker starts.
+    return configured_ && Initialize(config_);
 }
 
 void UsbAudio::Start() { if (initialized_) running_ = true; }
 void UsbAudio::Stop() { running_ = false; }
 
-void UsbAudio::Uninstall() {
-    if (!initialized_) return;
+bool UsbAudio::Uninstall() {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    if (!initialized_) return true;
     running_ = false;
     connected_ = false;
     mic_streaming_ = false;
-    tinyusb_driver_uninstall();
+    tud_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(250));  // Host must observe a real detach.
+    StopUsbTask();
+    connected_ = false;
+    mic_streaming_ = false;
+    const esp_err_t err = tinyusb_driver_uninstall();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "tinyusb_driver_uninstall: %s", esp_err_to_name(err));
+        // Keep buffers alive: the USB task may still reference them.
+        return false;
+    }
     if (mic_ringbuf_) {
         vRingbufferDelete((RingbufHandle_t)mic_ringbuf_);
         mic_ringbuf_ = nullptr;
     }
     initialized_ = false;
+    connected_ = false;
+    mic_streaming_ = false;
     ESP_LOGI(TAG, "USB audio uninstalled");
+    return true;
 }
 
 bool UsbAudio::SendMicrophoneData(const int16_t* pcm, size_t samples) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
     if (!running_ || !connected_ || !mic_streaming_ || !mic_ringbuf_ || !pcm || !samples) return false;
     return xRingbufferSend((RingbufHandle_t)mic_ringbuf_, pcm, samples * sizeof(int16_t), 0) == pdTRUE;
 }
@@ -228,12 +297,15 @@ void UsbAudio::FeedMicrophone() {
 }
 
 size_t UsbAudio::AvailableSpeakerSamples() const {
+    std::lock_guard<std::mutex> lock(io_mutex_);
     if (!initialized_ || !config_.speaker_enabled || !connected_ || !running_) return 0;
     return tud_audio_n_available(AUDIO_FUNC_SPEAKER) / sizeof(int16_t);
 }
 
 size_t UsbAudio::FetchSpeakerData(int16_t* out, size_t max_samples) {
-    if (!out || !max_samples || !AvailableSpeakerSamples()) return 0;
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    if (!out || !max_samples || !initialized_ || !config_.speaker_enabled ||
+        !connected_ || !running_) return 0;
     if (max_samples > UINT16_MAX / sizeof(int16_t)) max_samples = UINT16_MAX / sizeof(int16_t);
     return tud_audio_n_read(AUDIO_FUNC_SPEAKER, out, max_samples * sizeof(int16_t)) / sizeof(int16_t);
 }

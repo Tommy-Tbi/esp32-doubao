@@ -175,10 +175,11 @@ CONFIG_USB_AUDIO_MIC=y
 ### 说明
 
 - 基于 TinyUSB 的 UAC2 设备类（`espressif/esp_tinyusb`，会在构建时自动拉取）。
-- 打开后 USB-OTG 独占内部 PHY，**同一原生 USB 口的 USB-Serial-JTAG 串口会消失**；调试需使用独立 UART 接口，并将控制台配置为 UART。
+- 音频模式下 USB-OTG 独占内部 PHY，**同一原生 USB 口的 USB-Serial-JTAG 串口会消失**。SparkBot 支持按键热切换到真正的原生 USB Serial/JTAG，不使用 TinyUSB CDC 模拟；音频模式调试仍需独立 UART。
 - 采样率固定 48kHz、16bit、单声道；端点最大包长 98 字节（96 字节音频 + 一个样本余量）。音量由本地控制，不声明未实现的 USB 音量/静音控制。
 - Speaker/Mic 开关控制数据通路，USB 始终枚举两个接口；关闭 Mic 时输出静音。
-- `sdkconfig.defaults` 默认开启 USB 音箱和麦克风，开机进入 OTG 模式。已有本地 `sdkconfig` 不会被默认值覆盖，需要在 menuconfig 中开启 `USB_AUDIO_DEVICE`、`USB_AUDIO_SPEAKER` 和 `USB_AUDIO_MIC`。
+- `sdkconfig.defaults` 默认开启 USB 音箱和麦克风；首次启动使用音频模式，之后按 NVS `otg/disabled` 保存的上次成功模式启动。已有本地 `sdkconfig` 不会被默认值覆盖，需要在 menuconfig 中开启 `USB_AUDIO_DEVICE`、`USB_AUDIO_SPEAKER` 和 `USB_AUDIO_MIC`。
+- `USB_AUDIO_DEVICE` 自动选择 `TINYUSB_NO_DEFAULT_TASK`：应用使用可协作退出的 USB 任务，先停止任务再卸载栈和 PHY，避免直接删除正在持锁的 TinyUSB 默认任务。
 - 设备本地正在播 TTS 时，USB 音箱任务会主动让路，避免两路声音叠加。
 
 ### 按键操作与退出 OTG 模式
@@ -189,22 +190,25 @@ CONFIG_USB_AUDIO_MIC=y
 | ---- | ---- |
 | 触摸键 1 | 空闲时开始对话；收音中停止收音；播报中打断播报 |
 | 触摸键 2 | 音量 -10，并显示「音量 xx%」 |
-| **触摸键 1 + 触摸键 2 同时按** | **退出 OTG 模式** |
-| BOOT (GPIO0) | 开始 / 停止对话，也可与触摸键组成组合键 |
+| **触摸键 1 + 触摸键 2 同时按** | **USB 音频 ↔ 原生 USB Serial/JTAG 双向热切换** |
+| BOOT (GPIO0) | 短按开始 / 停止对话；长按 5 秒热切换 USB；也可与触摸键组成组合键 |
 
 本项目不做 WiFi 配网：所有按键都不会进入配网模式，WiFi 信息使用 NVS 中已保存的配置。
 
-**同时按两个触摸键 => 退出 OTG 模式**（`ComboKeyDetector`，窗口 250ms）：
+**同时按两个触摸键，或 BOOT 长按 5 秒 => 双向热切换**（`ComboKeyDetector`，组合窗口 500ms）：
 
-- PC 接入 USB 后设备自动进入 OTG 模式（USB 音箱 + 麦克风），屏幕上显示常驻提示界面「OTG 模式运行中」。
-- 两个键同时按住（第二个键按下时第一个还按着），或在 250ms 内先后按下两个不同的键，会：调用 `UsbAudio::Stop()` 停止 USB 音频通路（麦克风不再上传、PC 音频不再从本地喇叭播出）→ 隐藏提示界面 → 状态栏清空 → 弹出「已退出 OTG 模式」，设备回到正常的语音对话模式。
-- 组合键生效期间会屏蔽单键动作（不会误触发音量/对话）。退出后需**重新插拔 USB** 才会再次进入 OTG 模式（`OtgMode::blocked_`）。
+- 不需要拔插 USB，也不执行 `esp_restart()`。电脑会看到软件断开和重新枚举，原有音频/串口/JTAG 会话会中断，需要应用重新打开设备。
+- 音频 → 原生 Serial/JTAG：禁止新的音频 I/O → 软件断开至少 250ms → 等待 USB 任务协作退出 → 卸载 TinyUSB 和 OTG PHY → 通过 `usb_new_phy(USB_PHY_CTRL_SERIAL_JTAG)` 交接内部 PHY。
+- 原生 Serial/JTAG → 音频：关闭原生 USB pads 并等待 250ms → 释放其 PHY → 重新安装 UAC2 栈和音频数据通路。即使以 JTAG 模式启动，重采样器和音频任务也已准备好。
+- 松开全部组合键后才能触发下一次切换；正在切换时忽略重复请求。USB 拔插只影响连接状态，不改变所选模式。
+- 成功切换后保存启动模式；保存失败会提示。若卸载或初始化留下不确定状态，停止继续交接并提示复位，不进行盲目重启。
+- 原生控制器恢复后可使用 USB JTAG/原生下载功能，但应用日志仍取决于 ESP-IDF 控制台配置；不会自动把 UART 日志重定向到 USB。电脑工具请求复位/进入下载模式属于工具自身行为，不是本热切换流程。
 
 相关文件：
 
 ```
 main/boards/esp-sparkbot/sparkbot_keys.cc   组合键（同时按两个键）检测
-main/boards/esp-sparkbot/otg_mode.cc        OTG 模式进入/退出 + 屏幕提示界面
+main/boards/esp-sparkbot/otg_mode.cc        USB PHY 双向交接任务 + 屏幕提示界面
 main/boards/esp-sparkbot/config.h           触摸键通道与灵敏度配置
 main/usb_audio.cc                            USB 复合音频设备（多监听者连接回调）
 ```
@@ -222,9 +226,19 @@ ESP-SPARKBOT 的 BOOT 键连接 GPIO0。通常不需要旧固件配合：
 上述方式以未通过 eFuse 禁用 USB/ROM 下载且启动绑带满足芯片要求为前提；
 若板子另有 USB-UART 桥，也可经 UART0 配合 BOOT/RESET 烧录。
 
-当前代码没有“软件切回烧录”的命令或按键处理；`UsbAudio::Stop()` 只暂停音频，
-不会释放 PHY，也不会进入 ROM 下载。普通重启会再次运行应用、重新启用 OTG，
-因此不能替代上述 BOOT + 硬件复位操作。
+固件正常运行时，可以先用组合键或 BOOT 长按切回原生 USB Serial/JTAG，再使用对应串口/JTAG 工具。
+如果固件未运行或提示 USB 切换失败，仍使用上述 BOOT + 硬件复位方式恢复。
+
+### 热切换板端验收
+
+主机模式管理/组合键测试：`python tests/test_usb_hot_switch.py`（需要 C++20 编译器；共享盘禁止执行时可用 `--run-dir` 指定本机目录）。该测试使用 SDK 模拟接口，不代替以下实机验收。
+
+1. 保持同一根 USB 数据线连接；确认音频模式出现 VID/PID `303A:4011` 的音箱和麦克风，播放和录音正常。
+2. 在播放/录音中按组合键：音频设备消失，出现芯片原生 USB Serial/JTAG（不是旧代码的 `303A:4012` 模拟 CDC）；验证 OpenOCD 可连接。
+3. 先关闭调试会话，再松开全部按键、重新按组合键：原生接口消失，音箱和麦克风重新出现；再次验证双向音频。
+4. 重复至少 20 次，检查 UART 日志、空闲堆内存和任务数，确认没有持续泄漏、看门狗复位或挂起。
+5. 分别在两种模式下复位，确认恢复上次成功选择的模式；特别验证以 JTAG 模式启动后能热切回音频。
+6. 检查 BOOT 长按、切换期间重复按键、未接 PC 时切换、实际拔插 USB 后的行为。
 
 ## 已修复问题
 

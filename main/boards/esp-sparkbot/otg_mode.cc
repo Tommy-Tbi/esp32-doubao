@@ -1,16 +1,78 @@
 #include "otg_mode.h"
 
 #include <esp_log.h>
-#include <esp_system.h>
 #include <lvgl.h>
 #include <nvs_flash.h>
 
 #if CONFIG_USB_AUDIO_DEVICE
 #include "usb_audio.h"
-#include "usb_cdc.h"
+#include "esp_private/usb_phy.h"
+#include "esp_private/periph_ctrl.h"
+#include "hal/usb_serial_jtag_ll.h"
 #endif
 
 #define TAG "OtgMode"
+
+namespace {
+constexpr uint32_t kConnectionChanged = 1;
+constexpr uint32_t kToggle = 2;
+
+#if CONFIG_USB_AUDIO_DEVICE
+// Owned only by the mode worker. TinyUSB owns its own OTG PHY handle.
+usb_phy_handle_t native_phy = nullptr;
+
+esp_err_t InstallNative() {
+    PERIPH_RCC_ATOMIC() {
+        usb_serial_jtag_ll_enable_bus_clock(true);
+    }
+    usb_serial_jtag_ll_phy_enable_pad(false);
+    const usb_phy_config_t config = {
+        .controller = USB_PHY_CTRL_SERIAL_JTAG,
+        .target = USB_PHY_TARGET_INT,
+        // Leave otg_mode/speed at DEFAULT/UNDEFINED for the non-OTG controller.
+    };
+    esp_err_t err = usb_new_phy(&config, &native_phy);
+    if (err != ESP_OK) return err;
+    // Explicit software detach, including when booting in native mode.
+    usb_serial_jtag_ll_phy_enable_pad(false);
+    vTaskDelay(pdMS_TO_TICKS(250));
+    usb_serial_jtag_ll_phy_disable_pull_override();
+    usb_serial_jtag_ll_phy_enable_pad(true);
+    return ESP_OK;
+}
+
+esp_err_t UninstallNative() {
+    if (!native_phy) return ESP_ERR_INVALID_STATE;
+    usb_serial_jtag_ll_phy_enable_pad(false);
+    vTaskDelay(pdMS_TO_TICKS(250));
+    esp_err_t err = usb_del_phy(native_phy);
+    if (err == ESP_OK) native_phy = nullptr;
+    else usb_serial_jtag_ll_phy_enable_pad(true);
+    return err;
+}
+
+bool BootInNativeMode() {
+    nvs_handle_t h;
+    if (nvs_open("otg", NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t disabled = 0;
+    esp_err_t err = nvs_get_u8(h, "disabled", &disabled);
+    nvs_close(h);
+    return err == ESP_OK && disabled == 1;
+}
+
+bool SaveMode(bool native) {
+    nvs_handle_t h;
+    esp_err_t err = nvs_open("otg", NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, "disabled", native ? 1 : 0);
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    if (err != ESP_OK) ESP_LOGE(TAG, "Save USB boot mode: %s", esp_err_to_name(err));
+    return err == ESP_OK;
+}
+#endif
+}
 
 OtgMode& OtgMode::GetInstance() {
     static OtgMode instance;
@@ -19,143 +81,141 @@ OtgMode& OtgMode::GetInstance() {
 
 void OtgMode::Begin(Display* display) {
     display_ = display;
-
 #if CONFIG_USB_AUDIO_DEVICE
-    // 追加监听者（不覆盖 AudioService 已注册的回调）
-    UsbAudio::GetInstance().AddConnectionCallback([](bool connected) {
-        OtgMode::GetInstance().OnUsbConnection(connected);
-    });
-
-    if (UsbAudio::GetInstance().IsConnected()) {
-        // 理论上不会发生（Begin 在 USB 枚举前调用），兜底处理
-        OnUsbConnection(true);
+    if (task_) return;
+    if (xTaskCreatePinnedToCore([](void* arg) { static_cast<OtgMode*>(arg)->Run(); },
+                    "usb_mode", 6144, this, 4, &task_, 0) != pdPASS) {
+        ESP_LOGE(TAG, "Cannot create USB mode worker");
+        return;
     }
+    UsbAudio::GetInstance().AddConnectionCallback([this](bool connected) {
+        OnUsbConnection(connected);
+    });
+    OnUsbConnection(UsbAudio::GetInstance().IsConnected());
 #else
-    ESP_LOGI(TAG, "USB audio disabled, OTG mode inactive");
+    ESP_LOGI(TAG, "USB audio disabled, hot switching unavailable");
 #endif
 }
 
+void OtgMode::ToggleByKeys(uint32_t key_mask) {
 #if CONFIG_USB_AUDIO_DEVICE
+    bool expected = false;
+    if (!task_ || !switching_.compare_exchange_strong(expected, true)) return;
+    ESP_LOGI(TAG, "combo 0x%08x: request USB PHY handoff", (unsigned)key_mask);
+    xTaskNotify(task_, kToggle, eSetBits);
+#else
+    (void)key_mask;
+#endif
+}
 
 void OtgMode::OnUsbConnection(bool connected) {
-    ESP_LOGI(TAG, "usb %s", connected ? "connected" : "disconnected");
-    usb_connected_.store(connected);
-
-    if (!connected) {
-        // 拔出 USB：清掉“按键退出”的锁定，重新插拔后可再次进入
-        bool was_active = active_.exchange(false);
-        blocked_.store(false);
-        if (was_active) {
-            Leave(false, 0);
-        }
-        HideOverlay();
-        return;
-    }
-
-    if (blocked_.load()) {
-        ESP_LOGI(TAG, "OTG mode stays off (exited by keys), unplug to re-enter");
-        return;
-    }
-    Enter();
+    // Never perform display work or uninstall inside TinyUSB's own task.
+    (void)connected;
+    if (task_) xTaskNotify(task_, kConnectionChanged, eSetBits);
 }
 
 void OtgMode::Enter() {
-    active_.store(true);
+#if CONFIG_USB_AUDIO_DEVICE
+    active_ = true;
     UsbAudio::GetInstance().Start();
-    ESP_LOGI(TAG, "enter OTG mode (USB speaker + mic)");
-
     ShowOverlay();
-    if (display_) {
-        display_->SetStatus(StatusText());
-        display_->ShowNotification("OTG 模式已开启，同时按两个按键可退出", 3000);
-    }
+    if (display_) display_->SetStatus(StatusText());
+#endif
 }
 
-void OtgMode::ExitByKeys(uint32_t key_mask) {
-    ESP_LOGI(TAG, "combo 0x%08x -> exit OTG mode", key_mask);
-
-    if (!usb_connected_.load()) {
-        if (display_) {
-            display_->ShowNotification("当前没有连接 USB，未进入 OTG 模式", 2000);
+void OtgMode::Run() {
+#if CONFIG_USB_AUDIO_DEVICE
+    auto& usb = UsbAudio::GetInstance();
+    if (BootInNativeMode()) {
+        esp_err_t err = InstallNative();
+        native_ = err == ESP_OK;
+        faulted_ = err != ESP_OK;
+        if (faulted_) ESP_LOGE(TAG, "Native PHY init: %s", esp_err_to_name(err));
+    } else {
+        // Detach any native interface left enabled by the ROM/bootloader before
+        // the very first UAC2 enumeration as well as during runtime handoffs.
+        PERIPH_RCC_ATOMIC() {
+            usb_serial_jtag_ll_enable_bus_clock(true);
         }
-        return;
+        usb_serial_jtag_ll_phy_enable_pad(false);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        faulted_ = !usb.Resume();
+        if (faulted_) ESP_LOGE(TAG, "Initial USB audio install failed");
     }
-
-    if (!active_.load()) {
-        // 之前已经用按键退出过了
-        if (display_) {
-            display_->ShowNotification("OTG 模式已关闭，重新插拔 USB 可恢复", 2000);
+    if (faulted_ && display_) display_->ShowNotification("USB 初始化失败，请复位设备", 3000);
+    for (;;) {
+        uint32_t events = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &events, portMAX_DELAY);
+        if (events & kToggle) {
+            if (!faulted_) SwitchMode();
+            else if (display_) display_->ShowNotification("USB 状态异常，请复位设备", 3000);
+            switching_ = false;
         }
-        return;
-    }
-
-    Leave(true, key_mask);
-}
-
-void OtgMode::Leave(bool by_keys, uint32_t key_mask) {
-    (void)key_mask;
-    active_.store(false);
-    if (by_keys) {
-        // 停止 USB 音频通路：麦克风停止上传，PC 音频不再从本地喇叭播出
-        blocked_.store(true);
-        UsbAudio::GetInstance().Stop();
-        ESP_LOGI(TAG, "exit OTG mode by keys");
-    }
-
-    HideOverlay();
-    if (display_) {
-        display_->SetStatus("");
-        if (by_keys) {
-            display_->ShowNotification("已退出 OTG 模式，切换到 JTAG 模式…", 3000);
-        }
-    }
-
-    if (by_keys) {
-        // 运行时切换：卸载 UAC2 描述符，安装 CDC-only 描述符
-        // PC 会重新枚举，先看到 UAC2 消失，然后看到 CDC ACM 出现
-        ESP_LOGW(TAG, "Switching USB: UAC2 -> CDC (JTAG console)");
-        UsbAudio::GetInstance().Uninstall();
-        // 短暂延时，让 PC 完拔 UAC2 设备
-        for (volatile int i = 0; i < 10000000; i++) { asm volatile("nop"); }
-        if (!UsbCdcInstall()) {
-            ESP_LOGE(TAG, "UsbCdcInstall failed");
-            if (display_) display_->ShowNotification("切换失败，重启中…", 2000);
-            for (volatile int i = 0; i < 10000000; i++) { asm volatile("nop"); }
-            esp_restart();
+        // Reconcile current state, not a stale mount event from before handoff.
+        bool connected = !native_ && !faulted_ && usb.IsInitialized() && usb.IsConnected();
+        usb_connected_ = connected;
+        if (connected) {
+            Enter();
         } else {
-            // 标记下次启动仍处于“OTG 禁用”状态，防止一旦重启又加载 UAC2
-            nvs_handle_t h;
-            if (nvs_open("otg", NVS_READWRITE, &h) == ESP_OK) {
-                nvs_set_u8(h, "disabled", 1);
-                nvs_commit(h);
-                nvs_close(h);
-            }
-            UsbCdcPrint("ESP-SparkBot: OTG exited, now in CDC/JTAG mode.\r\n");
+            active_ = false;
+            HideOverlay();
+            if (display_) display_->SetStatus(native_ ? "USB Serial/JTAG" : "");
         }
     }
+#endif
 }
 
-void OtgDisableAndRestart() {
-    ESP_LOGW(TAG, "Persisting otg/disabled=1 and restarting…");
-    nvs_handle_t h;
-    if (nvs_open("otg", NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, "disabled", 1);
-        nvs_commit(h);
-        nvs_close(h);
+void OtgMode::SwitchMode() {
+#if CONFIG_USB_AUDIO_DEVICE
+    auto& usb = UsbAudio::GetInstance();
+    active_ = false;
+    usb_connected_ = false;
+    HideOverlay();
+    if (display_) display_->ShowNotification("正在切换 USB，请等待电脑重新识别…", 3000);
+
+    bool success = false;
+    if (!native_) {
+        ESP_LOGI(TAG, "Handoff: UAC2 OTG -> native USB Serial/JTAG");
+        if (!usb.Uninstall()) {
+            // Do not reuse a PHY whose task/interrupt teardown failed.
+            faulted_ = true;
+        } else {
+            esp_err_t err = InstallNative();
+            if (err == ESP_OK) {
+                native_ = true;
+                success = true;
+            } else {
+                ESP_LOGE(TAG, "Native PHY install: %s; restoring UAC2", esp_err_to_name(err));
+                faulted_ = !usb.Resume();
+            }
+        }
+    } else {
+        ESP_LOGI(TAG, "Handoff: native USB Serial/JTAG -> UAC2 OTG");
+        esp_err_t err = UninstallNative();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Native PHY release: %s", esp_err_to_name(err));
+        } else if (usb.Resume()) {
+            native_ = false;
+            success = true;
+        } else {
+            // esp_tinyusb 1.x install errors may leave a partial stack/PHY.
+            // Never blindly acquire a second PHY or reboot into the same loop.
+            faulted_ = true;
+            native_ = false;
+        }
     }
-    // 给屏幕时间刷新通知
-    for (volatile int i = 0; i < 20000000; i++) { asm volatile("nop"); }
-    esp_restart();
+    if (success) {
+        bool saved = SaveMode(native_);
+        if (display_) display_->ShowNotification(
+            !saved ? "USB 已切换，但启动模式保存失败" :
+            native_ ? "已切到原生 Serial/JTAG，再按组合键恢复音频" :
+                      "USB 音频已启用，等待电脑识别", 3000);
+    } else if (display_) {
+        display_->ShowNotification(faulted_ ? "USB 切换失败，请复位设备" :
+                                              "USB 切换失败，已保留原模式", 3000);
+    }
+#endif
 }
-
-#else  // CONFIG_USB_AUDIO_DEVICE
-
-void OtgMode::OnUsbConnection(bool connected) { (void)connected; }
-void OtgMode::Enter() {}
-void OtgMode::Leave(bool by_keys, uint32_t key_mask) { (void)by_keys; (void)key_mask; }
-void OtgMode::ExitByKeys(uint32_t key_mask) { (void)key_mask; }
-
-#endif  // CONFIG_USB_AUDIO_DEVICE
 
 // ---------------------------------------------------------------------------
 // 屏幕显示
@@ -196,7 +256,7 @@ void OtgMode::ShowOverlay() {
         lv_obj_set_style_text_align(desc, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(desc, lv_color_hex(0xE0E0E0), 0);
         lv_label_set_text(desc,
-                          "USB 音箱 + 麦克风已开启\nPC 音频由本机喇叭播放\n同时按下任意两个按键退出");
+                          "USB 音箱 + 麦克风已开启\nPC 音频由本机喇叭播放\n同时按两个键切到 Serial/JTAG");
 
         overlay_ = overlay;
     }

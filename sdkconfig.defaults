@@ -23,8 +23,9 @@ CONFIG_LANGUAGE_ZH_CN=y
 CONFIG_USE_AFE_WAKE_WORD=y
 CONFIG_USE_AUDIO_PROCESSOR=y
 
-## USB 音频：开机使用内部 PHY 进入 OTG 音箱 + 麦克风模式
-## 同一原生 USB 口的 USB-Serial-JTAG 将不可同时使用。
+## USB 音频：首次开机进入 OTG 音箱 + 麦克风模式，之后记住按键选择。
+## 组合键或 BOOT 长按可与原生 Serial/JTAG 双向热切换，无需拔线/重启。
+## 两种模式共用内部 PHY，不能同时使用。
 CONFIG_USB_AUDIO_DEVICE=y
 CONFIG_USB_AUDIO_SPEAKER=y
 CONFIG_USB_AUDIO_MIC=y

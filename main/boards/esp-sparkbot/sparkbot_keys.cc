@@ -53,7 +53,9 @@ void ComboKeyDetector::PressDown(int key_id) {
         // 条件二：另一个键在窗口时间内被按下（快速先后按两个不同键）
         const bool quick = (last_key_ >= 0 && last_key_ != key_id) &&
                            (now - last_press_us_) <= static_cast<int64_t>(window_ms_) * 1000;
-        if (overlap || quick) {
+        // One handoff per chord. A third key or a re-press while another key
+        // remains held must not immediately switch back to the previous mode.
+        if ((overlap || quick) && !(pressed_mask_ & kComboLatchBit)) {
             combo_mask = pressed_mask_ & ~kComboLatchBit;
             pressed_mask_ |= kComboLatchBit;
         }

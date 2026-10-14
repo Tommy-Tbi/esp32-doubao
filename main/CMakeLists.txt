@@ -40,8 +40,7 @@ set(SOURCES "audio/audio_codec.cc"
 # Conditionally add USB audio source
 if(CONFIG_USB_AUDIO_DEVICE)
     list(APPEND SOURCES "usb_audio.cc")
-    # CDC-only fallback for runtime "OTG -> JTAG" switch
-    list(APPEND SOURCES "usb_cdc.cc")
+    # Native Serial/JTAG uses the ESP32-S3 hardware controller, not TinyUSB CDC.
 endif()
 
 # Conditionally add Douyin voice protocol

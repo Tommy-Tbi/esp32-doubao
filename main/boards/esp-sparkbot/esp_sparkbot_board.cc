@@ -10,8 +10,6 @@
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
-#include <esp_system.h>
-#include <nvs_flash.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
 #include <driver/uart.h>
@@ -124,7 +122,7 @@ private:
 
     void InitializeButtons() {
         // ------------------------------------------------------------------
-        // 组合键：同时按下任意两个按键 => 退出 OTG 模式
+        // 组合键：USB 音频与原生 USB Serial/JTAG 双向热切换
         // ------------------------------------------------------------------
         combo_keys_.SetWindowMs(500);  // 放宽到 500ms
         combo_keys_.OnCombo([this](uint32_t mask) {
@@ -134,7 +132,7 @@ private:
                 snprintf(text, sizeof(text), "组合键: %s", ComboKeyDetector::Describe(mask).c_str());
                 display_->ShowNotification(text, 2000);
             }
-            OtgMode::GetInstance().ExitByKeys(mask);
+            OtgMode::GetInstance().ToggleByKeys(mask);
         });
 
         // Boot button: toggle chat state (connect/disconnect)
@@ -150,28 +148,17 @@ private:
             }
             ToggleChat();
         });
-        // BOOT 长按 5 秒（由构造函数设置）：清除 OTG 禁用标志 + 重启，下次启动会重新进入 OTG 模式
+        // BOOT 长按 5 秒：同样请求双向热切换，不重启，不阻塞按键任务
         boot_button_.OnLongPress([this]() {
             if (combo_keys_.IsComboActive()) {
                 return;
             }
-            nvs_handle_t h;
-            if (nvs_open("otg", NVS_READWRITE, &h) == ESP_OK) {
-                nvs_erase_key(h, "disabled");
-                nvs_commit(h);
-                nvs_close(h);
-            }
-            if (display_) {
-                display_->ShowNotification("OTG 重新启用，3 秒后重启…", 3000);
-            }
-            ESP_LOGW(TAG, "BOOT long press: re-enable OTG, restarting…");
-            for (volatile int i = 0; i < 20000000; i++) { asm volatile("nop"); }
-            esp_restart();
+            OtgMode::GetInstance().ToggleByKeys();
         });
 
         // ------------------------------------------------------------------
         // 触摸键（本设备 2 个）：触摸键 1 对话，触摸键 2 音量减
-        // 两个触摸键同时按下（组合键）=> 退出 OTG 模式
+        // 两个触摸键同时按下（组合键）=> 双向热切换 USB 模式
         // ------------------------------------------------------------------
         // Touch button 1: 开始/停止对话
         touch_buttons_[0]->OnPress([this]() {
@@ -383,8 +370,7 @@ public:
         // （IDF 要求 touch_element_start() 晚于 element 创建）
         TouchButton::StartAll();
         // TouchButton::ReBaseline();  // 临时关掉，看触摸键 1 是否恢复
-        // USB(OTG) 模式管理：USB 接入自动进入，同时按两个按键退出
-        OtgMode::GetInstance().Begin(display_);
+        // USB mode worker starts in Application after AudioService is ready.
         GetBacklight()->RestoreBrightness();
     }
 

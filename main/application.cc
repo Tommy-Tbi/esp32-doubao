@@ -10,6 +10,9 @@
 #include "assets/lang_config.h"
 #include "assets.h"
 #include "settings.h"
+#if CONFIG_BOARD_TYPE_ESP_SPARKBOT
+#include "boards/esp-sparkbot/otg_mode.h"
+#endif
 
 #include <cstring>
 #include <esp_log.h>
@@ -104,6 +107,9 @@ void Application::Initialize() {
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
     audio_service_.Start();
+#if CONFIG_BOARD_TYPE_ESP_SPARKBOT
+    OtgMode::GetInstance().Begin(display);
+#endif
 
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
