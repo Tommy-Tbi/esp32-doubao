@@ -105,6 +105,10 @@ public:
         lv_display_set_offset(lcd, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y);
         DisplayLockGuard lock(this);
         auto* screen = lv_display_get_screen_active(lcd);
+        // Do not depend on a theme to supply an opaque background. In partial
+        // RGB565 rendering, every dirty region must repaint its old pixels.
+        lv_obj_remove_style_all(screen);
+        lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(screen, lv_color_hex(kBackground), 0);
         lv_obj_set_style_text_font(screen, &font_puhui_20_4, 0);
         lv_obj_set_style_text_color(screen, lv_color_hex(kText), 0);
@@ -162,7 +166,8 @@ public:
             } else {
                 body_ = lv_label_create(audio_panel_);
                 lv_obj_set_width(body_, 188);
-                lv_obj_set_style_text_font(body_, &font_puhui_14_1, 0);
+                lv_obj_set_style_text_font(body_, &font_puhui_20_4, 0);
+                lv_obj_set_style_text_color(body_, lv_color_hex(kText), 0);
                 lv_obj_set_style_text_align(body_, LV_TEXT_ALIGN_CENTER, 0);
                 lv_obj_set_style_text_line_space(body_, 8, 0);
                 lv_label_set_long_mode(body_, LV_LABEL_LONG_WRAP);
@@ -181,6 +186,9 @@ public:
         } else {
             lv_obj_set_style_text_color(status_, lv_color_hex(kAccent), 0);
         }
+        // A mode transition also clears pixels outside the content card (old
+        // header/footer glyphs and rounded corners). No continuous full redraw.
+        lv_obj_invalidate(lv_obj_get_screen(audio_panel_));
     }
 
     void ShowNotification(const char* text, int duration_ms = 3000) override {
@@ -230,6 +238,8 @@ protected:
 private:
     void InitializeContentPanel(lv_obj_t* screen) {
         audio_panel_ = lv_obj_create(screen);
+        lv_obj_remove_style_all(audio_panel_);
+        lv_obj_set_style_bg_opa(audio_panel_, LV_OPA_COVER, 0);
         lv_obj_set_size(audio_panel_, 216, 166);
         // Fixed 240x240 layout: header, audio card, then a separate notice area.
         lv_obj_align(audio_panel_, LV_ALIGN_TOP_MID, 0, 42);
@@ -287,12 +297,16 @@ private:
         lv_obj_set_size(volume_bar_, 180, 6);
         lv_obj_align(volume_bar_, LV_ALIGN_TOP_MID, 0, 98);
         lv_bar_set_range(volume_bar_, 0, 100);
+        lv_obj_set_style_bg_opa(volume_bar_, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(volume_bar_, LV_OPA_COVER, LV_PART_INDICATOR);
         lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(kBorder), LV_PART_MAIN);
         lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(kAccent), LV_PART_INDICATOR);
         lv_obj_set_style_radius(volume_bar_, LV_RADIUS_CIRCLE, LV_PART_MAIN);
         lv_obj_set_style_radius(volume_bar_, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
 
         mic_pill_ = lv_obj_create(audio_panel_);
+        lv_obj_remove_style_all(mic_pill_);
+        lv_obj_set_style_bg_opa(mic_pill_, LV_OPA_COVER, 0);
         lv_obj_set_size(mic_pill_, 180, 30);
         lv_obj_align(mic_pill_, LV_ALIGN_TOP_MID, 0, 120);
         lv_obj_remove_flag(mic_pill_, LV_OBJ_FLAG_SCROLLABLE);
@@ -307,6 +321,8 @@ private:
         lv_label_set_text(mic_label_, kMicIdle);
         lv_obj_align(mic_label_, LV_ALIGN_CENTER, 8, 0);
         mic_dot_ = lv_obj_create(mic_pill_);
+        lv_obj_remove_style_all(mic_dot_);
+        lv_obj_set_style_bg_opa(mic_dot_, LV_OPA_COVER, 0);
         lv_obj_set_size(mic_dot_, 8, 8);
         lv_obj_set_style_radius(mic_dot_, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_border_width(mic_dot_, 0, 0);

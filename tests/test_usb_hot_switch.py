@@ -231,6 +231,12 @@ def main():
     ui_source = (ROOT / "main/usb/usb_device.cc").read_text(encoding="utf-8")
     assert "lv_obj_clean(audio_panel_)" in ui_source
     assert "if (!audio_view_) return;" in ui_source
+    # Theme-independent repaint contract: deleting widgets alone does not
+    # guarantee that transparent RGB565 regions erase the old panel pixels.
+    for obj in ("screen", "audio_panel_", "mic_pill_", "mic_dot_"):
+        assert f"lv_obj_set_style_bg_opa({obj}, LV_OPA_COVER, 0);" in ui_source
+    assert "lv_obj_invalidate(lv_obj_get_screen(audio_panel_));" in ui_source
+    assert "lv_obj_set_style_text_font(body_, &font_puhui_20_4, 0);" in ui_source
     out = ROOT / ".tmp" / "usb_hot_switch_test"
     out.mkdir(parents=True, exist_ok=True)
     for name in ("esp_log.h", "lvgl.h", "nvs_flash.h", "usb_audio.h", "display.h",
