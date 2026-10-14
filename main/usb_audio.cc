@@ -46,24 +46,24 @@ static_assert(CFG_TUD_HID == 1);
 
 // Deliberately no Feature Unit: volume is controlled locally. Do not advertise
 // mute/volume/connector controls unless their class requests are implemented.
-#define AUDIO_COMMON_DESC(itf, category, input_type, output_type, stream_term, eps) \
-    TUD_AUDIO_DESC_IAD(itf, 2, 4), \
-    TUD_AUDIO_DESC_STD_AC(itf, 0, 4), \
+#define AUDIO_COMMON_DESC(itf, category, input_type, output_type, stream_term, eps, stridx) \
+    TUD_AUDIO_DESC_IAD(itf, 2, stridx), \
+    TUD_AUDIO_DESC_STD_AC(itf, 0, stridx), \
     TUD_AUDIO_DESC_CS_AC(0x0200, category, TUD_AUDIO_DESC_CLK_SRC_LEN + \
         TUD_AUDIO_DESC_INPUT_TERM_LEN + TUD_AUDIO_DESC_OUTPUT_TERM_LEN, 0), \
     TUD_AUDIO_DESC_CLK_SRC(4, AUDIO_CLOCK_SOURCE_ATT_INT_FIX_CLK, \
         AUDIO_CTRL_R << AUDIO_CLOCK_SOURCE_CTRL_CLK_FRQ_POS, 0, 0), \
-    TUD_AUDIO_DESC_INPUT_TERM(1, input_type, 0, 4, 1, 0, 0, 0, 0), \
-    TUD_AUDIO_DESC_OUTPUT_TERM(3, output_type, 0, 1, 4, 0, 0), \
-    TUD_AUDIO_DESC_STD_AS_INT(itf + 1, 0, 0, 0), \
-    TUD_AUDIO_DESC_STD_AS_INT(itf + 1, 1, eps, 0), \
+    TUD_AUDIO_DESC_INPUT_TERM(1, input_type, 0, 4, 1, 0, 0, 0, stridx), \
+    TUD_AUDIO_DESC_OUTPUT_TERM(3, output_type, 0, 1, 4, 0, stridx), \
+    TUD_AUDIO_DESC_STD_AS_INT(itf + 1, 0, 0, stridx), \
+    TUD_AUDIO_DESC_STD_AS_INT(itf + 1, 1, eps, stridx), \
     TUD_AUDIO_DESC_CS_AS_INT(stream_term, 0, AUDIO_FORMAT_TYPE_I, \
         AUDIO_DATA_FORMAT_TYPE_I_PCM, 1, 0, 0), \
     TUD_AUDIO_DESC_TYPE_I_FORMAT(2, 16)
 
 static const uint8_t kSpeakerDesc[] = {
     AUDIO_COMMON_DESC(ITF_SPK_AC, AUDIO_FUNC_DESKTOP_SPEAKER,
-        AUDIO_TERM_TYPE_USB_STREAMING, AUDIO_TERM_TYPE_OUT_DESKTOP_SPEAKER, 1, 2),
+        AUDIO_TERM_TYPE_USB_STREAMING, AUDIO_TERM_TYPE_OUT_DESKTOP_SPEAKER, 1, 2, 4),
     TUD_AUDIO_DESC_STD_AS_ISO_EP(EPNUM_SPK_OUT,
         TUSB_XFER_ISOCHRONOUS | TUSB_ISO_EP_ATT_ASYNCHRONOUS, UAC_EP_SIZE, 1),
     TUD_AUDIO_DESC_CS_AS_ISO_EP(0, 0, 0, 0),
@@ -72,7 +72,7 @@ static const uint8_t kSpeakerDesc[] = {
 };
 static const uint8_t kMicDesc[] = {
     AUDIO_COMMON_DESC(ITF_MIC_AC, AUDIO_FUNC_MICROPHONE,
-        AUDIO_TERM_TYPE_IN_GENERIC_MIC, AUDIO_TERM_TYPE_USB_STREAMING, 3, 1),
+        AUDIO_TERM_TYPE_IN_GENERIC_MIC, AUDIO_TERM_TYPE_USB_STREAMING, 3, 1, 6),
     TUD_AUDIO_DESC_STD_AS_ISO_EP(EPNUM_MIC_IN,
         TUSB_XFER_ISOCHRONOUS | TUSB_ISO_EP_ATT_ASYNCHRONOUS, UAC_EP_SIZE, 1),
     TUD_AUDIO_DESC_CS_AS_ISO_EP(0, 0, 0, 0),
@@ -95,7 +95,7 @@ static const tusb_desc_device_t kDescDevice = {
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = 0x303A,
     .idProduct = 0x4011,
-    .bcdDevice = 0x0102,
+    .bcdDevice = 0x0103,
     .iManufacturer = 1,
     .iProduct = 2,
     .iSerialNumber = 3,
@@ -103,8 +103,8 @@ static const tusb_desc_device_t kDescDevice = {
 };
 static const char kLanguage[] = {0x09, 0x04};
 static const char* kStrings[] = {
-    kLanguage, "ESP32-S3", "ESP32-S3 USB Speaker+Mic", "0001", "UAC2 Speaker+Mic",
-    "Media Control",
+    kLanguage, "ESP32-S3", "ESP32-S3 USB Speaker+Mic", "0001", "ESP32S3 Speaker",
+    "Media Control", "ESP32S3 MIC",
 };
 
 extern "C" {

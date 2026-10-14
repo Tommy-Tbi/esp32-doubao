@@ -104,9 +104,10 @@ int main() {
     const auto start = now_us;
     keys.PressDown(COMBO_KEY_3);  // repeated down must not restart the hold
     keys.PressDown(-1); keys.PressUp(31);  // ignore invalid key ids
-    now_us = start + 4999999; keys.Poll();
+    static_assert(ComboKeyDetector::kHoldUs == 3000000);
+    now_us = start + 2999999; keys.Poll();
     assert(chords == 0 && keys.IsComboActive());
-    now_us = start + 5000000; keys.Poll();
+    now_us = start + 3000000; keys.Poll();
     assert(chords == 1);
     now_us += 9000000; keys.Poll();
     keys.PressDown(COMBO_KEY_BOOT);
@@ -116,20 +117,20 @@ int main() {
     keys.PressUp(COMBO_KEY_2); keys.PressUp(COMBO_KEY_3);
     keys.PressUp(COMBO_KEY_BOOT);
 
-    // Early release cancels; pressing again requires a new continuous 5s.
+    // Early release cancels; pressing again requires a new continuous 3s.
     keys.PressDown(COMBO_KEY_2); keys.PressDown(COMBO_KEY_3);
-    now_us += 4000000;
+    now_us += 2000000;
     keys.PressUp(COMBO_KEY_2);
     assert(keys.IsComboActive());  // suppress volume on remaining key release
     now_us += 6000000; keys.Poll(); assert(chords == 1);
     keys.PressDown(COMBO_KEY_2);
-    now_us += 4000000;
+    now_us += 2000000;
     keys.PressDown(COMBO_KEY_1);  // unrelated pad must not restart the timer
     now_us += 1000000; keys.Poll(); assert(chords == 2);
     keys.Reset(); now_us += 6000000; keys.Poll();
     assert(chords == 2 && !keys.IsComboActive());
     keys.PressDown(COMBO_KEY_2); keys.PressDown(COMBO_KEY_3);
-    now_us += 4999999;
+    now_us += 2999999;
     keys.PressUp(COMBO_KEY_2);
     assert(keys.IsComboActive());
     keys.PressUp(COMBO_KEY_3);

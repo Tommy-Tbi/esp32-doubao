@@ -298,7 +298,7 @@ void OtgMode::ShowOverlay(PanelState state) {
     const char* badge = "USB AUDIO";
     const char* title = "音箱 + 麦克风";
     const char* detail = "PC 音频由本机播放\n麦克风同步传回 PC";
-    const char* hint = "左右键同按 5 秒切换\n或长按 BOOT 5 秒";
+    const char* hint = "左右键同按 3 秒切换\n或长按 BOOT 5 秒";
     uint32_t accent = 0x38BDF8;
     if (state == PanelState::ToAudio || state == PanelState::ToNative) {
         badge = "SWITCHING";

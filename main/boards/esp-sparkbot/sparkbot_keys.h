@@ -16,12 +16,12 @@ enum ComboKeyId : int {
 
 const char* ComboKeyName(int key_id);
 
-// Left/right volume touch pads (2/3), continuously held for five seconds.
+// Left/right volume touch pads (2/3), continuously held for three seconds.
 // Call Poll regularly from a task; callbacks run outside the state lock.
 class ComboKeyDetector {
 public:
     static constexpr uint32_t kModeKeys = (1u << COMBO_KEY_2) | (1u << COMBO_KEY_3);
-    static constexpr int64_t kHoldUs = 5000000;
+    static constexpr int64_t kHoldUs = 3000000;
     void OnCombo(std::function<void(uint32_t)> callback) { on_combo_ = std::move(callback); }
     void PressDown(int key_id);
     void PressUp(int key_id);

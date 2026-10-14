@@ -25,7 +25,7 @@
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_14_1);
-constexpr const char* kKeyHint = "左右键同按 5 秒切换";
+constexpr const char* kKeyHint = "左右键同按 3 秒切换";
 
 namespace {
 constexpr const char* kVolumeFormat = "%d%%";
@@ -140,7 +140,7 @@ public:
             lv_obj_add_flag(audio_panel_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_remove_flag(body_, LV_OBJ_FLAG_HIDDEN);
             lv_label_set_text(body_, std::strcmp(text, "USB 调试") == 0 ?
-                "原生 Serial/JTAG\n左右键同按 5 秒\n返回 USB 音频" : "");
+                "原生 Serial/JTAG\n左右键同按 3 秒\n返回 USB 音频" : "");
         }
     }
 
