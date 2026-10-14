@@ -5,8 +5,9 @@
 #include <driver/uart.h>
 #include <driver/touch_sensor.h>
 
-#define AUDIO_INPUT_SAMPLE_RATE  16000
-#define AUDIO_OUTPUT_SAMPLE_RATE 16000
+// Standalone UAC2: match the hardware to USB, avoiding AFE/resampler coupling.
+#define AUDIO_INPUT_SAMPLE_RATE  48000
+#define AUDIO_OUTPUT_SAMPLE_RATE 48000
 
 #define AUDIO_I2S_GPIO_MCLK GPIO_NUM_45
 #define AUDIO_I2S_GPIO_WS GPIO_NUM_41

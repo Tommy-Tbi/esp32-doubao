@@ -1,6 +1,7 @@
 #include "es8311_audio_codec.h"
 
 #include <esp_log.h>
+#include <freertos/task.h>
 
 #define TAG "Es8311AudioCodec"
 
@@ -183,15 +184,22 @@ void Es8311AudioCodec::EnableOutput(bool enable) {
 }
 
 int Es8311AudioCodec::Read(int16_t* dest, int samples) {
-    if (input_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(dev_, (void*)dest, samples * sizeof(int16_t)));
+    if (!input_enabled_ || !dev_) return 0;
+    const esp_err_t err = esp_codec_dev_read(dev_, dest, samples * sizeof(int16_t));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Microphone read failed: %s", esp_err_to_name(err));
+        return 0;  // Do not report stale/uninitialized PCM as a successful read.
     }
     return samples;
 }
 
 int Es8311AudioCodec::Write(const int16_t* data, int samples) {
-    if (output_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(dev_, (void*)data, samples * sizeof(int16_t)));
+    if (!output_enabled_ || !dev_) return 0;
+    const esp_err_t err = esp_codec_dev_write(dev_, const_cast<int16_t*>(data), samples * sizeof(int16_t));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Speaker write failed: %s", esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(10));
+        return 0;
     }
     return samples;
 }

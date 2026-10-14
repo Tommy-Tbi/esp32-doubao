@@ -12,21 +12,23 @@
 class OtgMode {
 public:
     static OtgMode& GetInstance();
-    // Call after AudioService has prepared its USB configuration/resamplers.
+    // Call after the audio bridge has prepared its USB configuration.
     void Begin(Display* display);
     bool IsUsbConnected() const { return usb_connected_.load(); }
     bool IsActive() const { return active_.load(); }
     bool IsBlocked() const { return native_.load(); }
     void ToggleByKeys(uint32_t key_mask = 0);
-    static const char* StatusText() { return "OTG 模式"; }
+    static const char* StatusText() { return "USB 音频"; }
 
 private:
     OtgMode() = default;
     void Run();
-    void SwitchMode();
+    const char* SwitchMode();
     void OnUsbConnection(bool connected);
     void Enter();
-    void ShowOverlay();
+    enum class PanelState { Hidden, Audio, ToNative, ToAudio, Error };
+    void ShowOverlay(PanelState state);
+    void SetUsbStatus(const char* text);
     void HideOverlay();
 
     Display* display_ = nullptr;
@@ -36,7 +38,13 @@ private:
     std::atomic<bool> native_{false};
     std::atomic<bool> switching_{false};
     bool faulted_ = false;  // Worker only; incomplete teardown requires reset.
+    const char* status_text_ = nullptr;  // Worker only; avoid clearing live notices
+    PanelState panel_state_ = PanelState::Hidden;  // Protected by DisplayLockGuard
     void* overlay_ = nullptr;
+    void* badge_ = nullptr;
+    void* title_ = nullptr;
+    void* detail_ = nullptr;
+    void* hint_ = nullptr;
 };
 
 #endif

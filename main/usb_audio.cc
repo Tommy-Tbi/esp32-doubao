@@ -142,6 +142,15 @@ bool tud_audio_set_itf_cb(uint8_t, const tusb_control_request_t* request) {
     }
     return true;
 }
+
+bool tud_audio_set_itf_close_EP_cb(uint8_t, const tusb_control_request_t* request) {
+    // TinyUSB 0.17 calls the close callback (not the final open callback) when
+    // the host switches to alternate 0. Stop enqueueing immediately on close.
+    if ((request->wIndex & 0xff) == ITF_MIC_AS) {
+        UsbAudio::GetInstance().OnMicrophoneInterface(false);
+    }
+    return true;
+}
 }  // extern "C"
 
 UsbAudio& UsbAudio::GetInstance() {
@@ -224,7 +233,7 @@ void UsbAudio::StopUsbTask() {
 }
 
 bool UsbAudio::Resume() {
-    // Configuration is set once by AudioService before the mode worker starts.
+    // Configuration is set once by the audio bridge before the mode worker starts.
     return configured_ && Initialize(config_);
 }
 
@@ -276,6 +285,7 @@ void UsbAudio::OnMicrophoneInterface(bool active) {
         }
     }
     mic_streaming_ = active;
+    ESP_LOGI(TAG, "USB microphone stream %s", active ? "started" : "stopped");
 }
 
 void UsbAudio::FeedMicrophone() {
@@ -311,7 +321,7 @@ size_t UsbAudio::FetchSpeakerData(int16_t* out, size_t max_samples) {
 }
 
 void UsbAudio::OnMounted() {
-    if (!initialized_) return;  // UsbAudio 未初始化时（CDC 模式）忽略
+    if (!initialized_) return;  // Native Serial/JTAG has no TinyUSB audio stack.
     connected_ = true;
     ESP_LOGI(TAG, "USB host connected");
     NotifyConnection(true);

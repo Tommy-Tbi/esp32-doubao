@@ -1,3 +1,10 @@
+# SparkBot on this branch is a standalone USB audio device. Do not compile
+# assistant, network/protocol, wake-word, AFE or Opus processing sources.
+if(CONFIG_BOARD_TYPE_ESP_SPARKBOT)
+    include(${CMAKE_CURRENT_LIST_DIR}/usb/firmware.cmake)
+    return()
+endif()
+
 # Define source files
 set(SOURCES "audio/audio_codec.cc"
             "audio/audio_service.cc"
@@ -977,42 +984,4 @@ add_dependencies(package_firmware app)
 # esp_tinyusb 的 tusb_config.h 没有暴露音频类的 Kconfig 项，需要手动把
 # CFG_TUD_AUDIO* 宏同时注入 TinyUSB 库和本组件，保证两边结构体布局一致。
 # ---------------------------------------------------------------------------
-if(CONFIG_USB_AUDIO_DEVICE)
-    if(tinyusb IN_LIST BUILD_COMPONENTS)
-        set(TINYUSB_COMPONENT tinyusb)
-    else()
-        set(TINYUSB_COMPONENT espressif__tinyusb)
-    endif()
-    idf_component_get_property(TINYUSB_LIB ${TINYUSB_COMPONENT} COMPONENT_LIB)
-
-    set(USB_AUDIO_DEFS
-        CFG_TUD_AUDIO=2
-        # Lengths include IAD; checked against actual descriptors by static_assert.
-        CFG_TUD_AUDIO_FUNC_1_DESC_LEN=125
-        CFG_TUD_AUDIO_FUNC_2_DESC_LEN=118
-        CFG_TUD_AUDIO_FUNC_1_N_AS_INT=1
-        CFG_TUD_AUDIO_FUNC_2_N_AS_INT=1
-        CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ=64
-        CFG_TUD_AUDIO_FUNC_2_CTRL_BUF_SZ=64
-        CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE=48000
-        CFG_TUD_AUDIO_FUNC_2_SAMPLE_RATE=48000
-        CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX=2
-        CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX=1
-        CFG_TUD_AUDIO_FUNC_2_N_BYTES_PER_SAMPLE_TX=2
-        CFG_TUD_AUDIO_FUNC_2_N_CHANNELS_TX=1
-        CFG_TUD_AUDIO_ENABLE_EP_IN=1
-        CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX=0
-        CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ=0
-        CFG_TUD_AUDIO_FUNC_2_EP_IN_SZ_MAX=98
-        CFG_TUD_AUDIO_FUNC_2_EP_IN_SW_BUF_SZ=384
-        CFG_TUD_AUDIO_ENABLE_EP_OUT=1
-        CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP=1
-        CFG_TUD_AUDIO_ENABLE_FEEDBACK_FORMAT_CORRECTION=0
-        CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX=98
-        CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ=1920
-        CFG_TUD_AUDIO_FUNC_2_EP_OUT_SZ_MAX=0
-        CFG_TUD_AUDIO_FUNC_2_EP_OUT_SW_BUF_SZ=0
-    )
-    target_compile_definitions(${TINYUSB_LIB} PUBLIC ${USB_AUDIO_DEFS})
-    target_compile_definitions(${COMPONENT_LIB} PUBLIC ${USB_AUDIO_DEFS})
-endif()
+include(${CMAKE_CURRENT_LIST_DIR}/usb/audio_config.cmake)

@@ -7,14 +7,17 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#if CONFIG_BOARD_TYPE_ESP_SPARKBOT
+#include "usb/usb_device.h"
+#else
 #include "application.h"
-#include "system_info.h"
+#endif
 
 #define TAG "main"
 
 extern "C" void app_main(void)
 {
-    // Initialize NVS flash for WiFi configuration
+    // Initialize NVS for volume and persisted USB mode.
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "Erasing NVS flash to fix corruption");
@@ -23,8 +26,11 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize and run the application
+#if CONFIG_BOARD_TYPE_ESP_SPARKBOT
+    RunUsbAudioDevice();  // No assistant, network, AFE or wake-word runtime.
+#else
     auto& app = Application::GetInstance();
     app.Initialize();
-    app.Run();  // This function runs the main event loop and never returns
+    app.Run();
+#endif
 }

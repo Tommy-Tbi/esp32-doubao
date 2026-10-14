@@ -1,7 +1,8 @@
-// Host-only SDK fakes. Tests exercise the real mode manager and combo detector;
-// USB enumeration, electrical behavior and audio DMA still require board tests.
+// Host-only SDK fakes. Tests exercise the real mode manager, PCM bridge and
+// combo detector. USB enumeration, electrical behavior and DMA need board tests.
 #pragma once
 #include <atomic>
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -11,6 +12,8 @@
 #include <vector>
 
 #define CONFIG_USB_AUDIO_DEVICE 1
+#define CONFIG_USB_AUDIO_SPEAKER 1
+#define CONFIG_USB_AUDIO_MIC 1
 #define ESP_LOGI(...) ((void)0)
 #define ESP_LOGE(...) ((void)0)
 #define ESP_LOGW(...) ((void)0)
@@ -29,6 +32,7 @@ inline bool fail_install = false, fail_release = false, fail_save = false;
 inline int boot_native = 0, notifications = 0, phy_installs = 0;
 inline bool pad_enabled = true;
 inline int64_t now_us = 0;
+inline int task_creates = 0, fail_task_at = -1;
 inline const char* esp_err_to_name(int) { return "fake-error"; }
 inline int nvs_open(const char*, int, int* h) { *h = 1; return ESP_OK; }
 inline int nvs_get_u8(int, const char*, uint8_t* v) { *v = boot_native; return ESP_OK; }
@@ -64,8 +68,10 @@ inline int usb_del_phy(usb_phy_handle_t h) {
 }
 inline int xTaskCreatePinnedToCore(void (*)(void*), const char*, int, void*, int,
                                   TaskHandle_t* task, int core) {
-    assert(core == 0);
-    *task = reinterpret_cast<void*>(1);
+    assert(core == 0 || core == 1);
+    ++task_creates;
+    if (task_creates == fail_task_at) return 0;
+    if (task) *task = reinterpret_cast<void*>(1);
     return pdPASS;
 }
 inline void vTaskDelay(int) {}
@@ -76,29 +82,102 @@ inline int64_t esp_timer_get_time() { return now_us += 1000; }
 
 struct Display {
     std::string status, notice;
-    void SetStatus(const char* s) { status = s; }
+    int status_updates = 0;
+    void SetStatus(const char* s) { status = s; notice.clear(); ++status_updates; }
     void ShowNotification(const char* s, int) { notice = s; }
 };
 struct DisplayLockGuard { explicit DisplayLockGuard(Display*) {} };
-struct lv_obj_t {};
+struct lv_event_t { void* user_data; };
+struct lv_obj_t {
+    std::string text;
+    int flags = 0, flow = 0;
+    void (*on_delete)(lv_event_t*) = nullptr;
+    void* user_data = nullptr;
+};
+inline int created_objects = 0;
 constexpr int LV_OBJ_FLAG_SCROLLABLE = 1, LV_SIZE_CONTENT = 0,
-    LV_OPA_COVER = 255, LV_TEXT_ALIGN_CENTER = 0, LV_OBJ_FLAG_HIDDEN = 2;
+    LV_OPA_COVER = 255, LV_TEXT_ALIGN_CENTER = 0, LV_OBJ_FLAG_HIDDEN = 2,
+    LV_OBJ_FLAG_CLICKABLE = 4, LV_OBJ_FLAG_IGNORE_LAYOUT = 8,
+    LV_FLEX_FLOW_COLUMN = 1, LV_FLEX_ALIGN_START = 0,
+    LV_FLEX_ALIGN_CENTER = 1, LV_OPA_20 = 51, LV_LABEL_LONG_WRAP = 0, LV_EVENT_DELETE = 1;
 #define LV_PCT(x) (x)
 inline lv_obj_t* lv_scr_act() { static lv_obj_t obj; return &obj; }
-inline lv_obj_t* lv_obj_create(lv_obj_t*) { return lv_scr_act(); }
-inline lv_obj_t* lv_label_create(lv_obj_t*) { return lv_scr_act(); }
+inline lv_obj_t* lv_obj_create(lv_obj_t*) { ++created_objects; return new lv_obj_t; }
+inline lv_obj_t* lv_label_create(lv_obj_t* p) { return lv_obj_create(p); }
+inline void lv_obj_set_flex_flow(lv_obj_t* p, int flow) { p->flow = flow; }
+inline void lv_label_set_text(lv_obj_t* p, const char* text) { p->text = text; }
+inline void lv_obj_add_flag(lv_obj_t* p, int flag) { p->flags |= flag; }
+inline void lv_obj_clear_flag(lv_obj_t* p, int flag) { p->flags &= ~flag; }
+inline void lv_obj_remove_flag(lv_obj_t* p, int flag) { lv_obj_clear_flag(p, flag); }
+inline void lv_obj_add_event_cb(lv_obj_t* p, void (*cb)(lv_event_t*), int, void* data) {
+    p->on_delete = cb; p->user_data = data;
+}
+inline void* lv_event_get_user_data(lv_event_t* e) { return e->user_data; }
 inline int lv_color_hex(int v) { return v; }
 #define LV_VOID(name) template<class... T> inline void name(T...) {}
-LV_VOID(lv_obj_remove_flag) LV_VOID(lv_obj_set_size) LV_VOID(lv_obj_center)
+LV_VOID(lv_obj_set_size) LV_VOID(lv_obj_center)
+LV_VOID(lv_obj_set_flex_align) LV_VOID(lv_obj_set_style_pad_row)
+LV_VOID(lv_obj_set_style_shadow_width) LV_VOID(lv_obj_set_style_shadow_opa)
+LV_VOID(lv_obj_set_style_shadow_color) LV_VOID(lv_obj_set_height)
+LV_VOID(lv_label_set_long_mode) LV_VOID(lv_obj_set_style_text_line_space)
 LV_VOID(lv_obj_set_style_bg_opa) LV_VOID(lv_obj_set_style_bg_color)
 LV_VOID(lv_obj_set_style_radius) LV_VOID(lv_obj_set_style_border_width)
 LV_VOID(lv_obj_set_style_border_color) LV_VOID(lv_obj_set_style_pad_all)
 LV_VOID(lv_obj_set_width) LV_VOID(lv_obj_set_style_text_align)
-LV_VOID(lv_obj_set_style_text_color) LV_VOID(lv_label_set_text)
-LV_VOID(lv_obj_clear_flag) LV_VOID(lv_obj_move_foreground) LV_VOID(lv_obj_add_flag)
+LV_VOID(lv_obj_set_style_text_color) LV_VOID(lv_obj_move_foreground)
+
+struct AudioCodec {
+    int input_rate = 48000, output_rate = 48000, channels = 1;
+    int starts = 0, reads = 0, writes = 0;
+    bool fail_read = false;
+    std::function<void()> on_read;
+    std::vector<int16_t> output;
+    int input_sample_rate() const { return input_rate; }
+    int output_sample_rate() const { return output_rate; }
+    int input_channels() const { return channels; }
+    int output_channels() const { return channels; }
+    void Start() { ++starts; }
+    bool InputData(std::vector<int16_t>& pcm) {
+        ++reads;
+        if (on_read) on_read();
+        if (fail_read) return false;
+        for (size_t i = 0; i < pcm.size(); ++i) pcm[i] = int16_t(1000 + i);
+        return true;
+    }
+    void OutputData(std::vector<int16_t>& pcm) { ++writes; output = pcm; }
+};
 
 struct UsbAudio {
+    struct Config {
+        int sample_rate, channels, bits_per_sample;
+        bool speaker_enabled, mic_enabled;
+    };
     bool initialized = false, connected = false;
+    bool mic_active = false, fail_send = false;
+    int mic_writes = 0;
+    std::vector<int16_t> mic_pcm, speaker_pcm;
+    std::function<void()> on_fetch;
+    bool Initialize(const Config& c, bool enable) {
+        assert(c.sample_rate == 48000 && c.channels == 1 && c.bits_per_sample == 16);
+        assert(!enable);  // Bridge must not steal the mode worker's PHY ownership.
+        return true;
+    }
+    bool IsMicrophoneActive() const { return mic_active && initialized && connected; }
+    bool SendMicrophoneData(const int16_t* p, size_t n) {
+        assert(IsMicrophoneActive());
+        if (fail_send) return false;
+        ++mic_writes; mic_pcm.assign(p, p + n); return true;
+    }
+    size_t AvailableSpeakerSamples() const {
+        return initialized && connected ? speaker_pcm.size() : 0;
+    }
+    size_t FetchSpeakerData(int16_t* out, size_t n) {
+        n = std::min(n, speaker_pcm.size());
+        std::copy_n(speaker_pcm.begin(), n, out);
+        speaker_pcm.erase(speaker_pcm.begin(), speaker_pcm.begin() + n);
+        if (on_fetch) on_fetch();
+        return n;
+    }
     bool fail_uninstall = false, fail_resume = false;
     static UsbAudio& GetInstance() { static UsbAudio usb; return usb; }
     bool IsInitialized() const { return initialized; }

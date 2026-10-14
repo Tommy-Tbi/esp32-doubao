@@ -127,11 +127,6 @@ private:
         combo_keys_.SetWindowMs(500);  // 放宽到 500ms
         combo_keys_.OnCombo([this](uint32_t mask) {
             ESP_LOGI(TAG, "combo %s pressed", ComboKeyDetector::Describe(mask).c_str());
-            if (display_) {
-                char text[64];
-                snprintf(text, sizeof(text), "组合键: %s", ComboKeyDetector::Describe(mask).c_str());
-                display_->ShowNotification(text, 2000);
-            }
             OtgMode::GetInstance().ToggleByKeys(mask);
         });
 
@@ -169,24 +164,23 @@ private:
             auto& app = Application::GetInstance();
             auto state = app.GetDeviceState();
             ESP_LOGI(TAG, "Touch button 1 (pad 1) pressed, state=%d", state);
-            if (display_) display_->ShowNotification("PAD1 触发: 对话", 1500);
 
             char text[48];
             switch (state) {
                 case kDeviceStateIdle:
-                    snprintf(text, sizeof(text), "对话：开始");
+                    snprintf(text, sizeof(text), "开始聆听");
                     app.StartListening();
                     break;
                 case kDeviceStateListening:
-                    snprintf(text, sizeof(text), "对话：停止收音");
+                    snprintf(text, sizeof(text), "已停止收音");
                     app.StopListening();
                     break;
                 case kDeviceStateSpeaking:
-                    snprintf(text, sizeof(text), "对话：打断播报");
+                    snprintf(text, sizeof(text), "已打断播报");
                     app.AbortSpeaking(kAbortReasonNone);
                     break;
                 default:
-                    snprintf(text, sizeof(text), "对话：当前状态 %d", (int)state);
+                    snprintf(text, sizeof(text), "请稍候再试");
                     break;
             }
             if (display_) {
@@ -209,7 +203,6 @@ private:
                 return;
             }
             ESP_LOGI(TAG, "Touch button 2 (pad 2) pressed - Volume Down");
-            if (display_) display_->ShowNotification("PAD2 触发: 音量 -10", 1500);
             ChangeVolume(-10);
         });
         touch_buttons_[1]->OnRelease([this]() {
@@ -223,7 +216,6 @@ private:
                 return;
             }
             ESP_LOGI(TAG, "Touch button 3 (pad 3) pressed - Volume Up");
-            if (display_) display_->ShowNotification("PAD3 触发: 音量 +10", 1500);
             ChangeVolume(10);
         });
         touch_buttons_[2]->OnRelease([this]() {

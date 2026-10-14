@@ -179,8 +179,9 @@ choice BOARD_TYPE
         bool "Espressif Korvo2 V3"
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_ESP_SPARKBOT
-        bool "Espressif SparkBot"
+        bool "Espressif SparkBot (standalone USB audio)"
         depends on IDF_TARGET_ESP32S3
+        select USB_AUDIO_DEVICE
     config BOARD_TYPE_ESP_SENSAIRSHUTTLE
         bool "Espressif ESP-SensairShuttle"
         depends on IDF_TARGET_ESP32C5

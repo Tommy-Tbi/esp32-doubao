@@ -9,7 +9,6 @@
 #include <string>
 #include <functional>
 
-#include "board.h"
 
 #define AUDIO_CODEC_DMA_DESC_NUM 6
 #define AUDIO_CODEC_DMA_FRAME_NUM 240

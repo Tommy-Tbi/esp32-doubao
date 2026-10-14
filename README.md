@@ -1,342 +1,107 @@
-| Supported Targets | ESP32-S3 |
-| ----------------- | -------- |
+# ESP-SPARKBOT USB 音箱 + 麦克风
 
-# 豆包语音助手 (esp32-doubao)
+当前分支是独立的 ESP32-S3 USB 音频固件，不运行语音助手、唤醒词、AFE/VAD、云端对话或网络配网。
 
-基于 ESP32-S3 的豆包（字节跳动火山引擎）实时语音对话设备。
-支持语音唤醒、ASR、TTS 实时流式对话，对话文本与表情显示在 LCD 屏幕上。
+## 功能
 
-## 硬件
+- USB UAC2 音箱：电脑播放 → ES8311 → 本机喇叭。
+- USB UAC2 麦克风：本机麦克风 → ES8311 → 电脑录音。
+- 双向均为 **48kHz / 16bit / 单声道**，codec 使用同样的采样率，不经过 Opus 或重采样。
+- USB 音频与**芯片原生 USB Serial/JTAG**双向热切换，不需要拔线或重启；电脑会断开旧设备并重新枚举，新模式不能与旧模式同时使用。
+- 保存音量和最后成功选择的 USB 模式。首次启动默认音频模式。
+- 内置 240×240 状态界面，无需下载表情、字体或语音模型资源。蓝色表示音频连接，黄色表示切换，红色表示异常。
 
-- **主控**：ESP32-S3（带 8MB PSRAM）
-- **板型**：esp-sparkbot
-- **屏幕**：SPI LCD + LVGL 图形界面
-- **音频**：ES8311 codec
-- **WiFi**：802.11 b/g/n
+### 录音通路
 
-## 功能特性
-
-- 实时语音对话（豆包大模型）
-- 流式文本显示（CHAT_RESPONSE event 550 实时刷新）
-- 流式语音合成（OGG/Opus 解码播放）
-- 多轮对话上下文保持
-- LCD 表情 / 文字界面
-- WiFi 配网（AP 模式 + Web 配网）
-
-## 项目结构
-
-```
-esp32-doubao/
-├── main/                          主程序
-│   ├── application.cc/h           应用层、状态机
-│   ├── protocols/
-│   │   └── douyin_voice_protocol.cc  豆包 WebSocket 协议实现
-│   ├── audio/
-│   │   └── audio_service.cc       Opus 编解码、队列管理
-│   ├── display/                   LVGL 显示
-│   └── ...
-├── partitions/v2/16m.csv          16MB Flash 分区表
-├── scripts/
-│   ├── idf.sh                     ESP-IDF 编译封装
-│   ├── idf_run.py                 idf.py 包装
-│   └── env.sh                     环境变量
-├── managed_components/            第三方组件
-├── build/                         编译输出
-└── sdkconfig                      项目配置
+```text
+麦克风 → ES8311 ADC / I2S 48kHz → 唯一采集任务 → USB 麦克风缓冲 → UAC2 IN
+电脑音频 → UAC2 OUT → 播放任务 → I2S 48kHz / ES8311 DAC → 喇叭
 ```
 
-## 编译与烧录
+采集不依赖设备待机、唤醒、聆听或网络状态。电脑打开麦克风接口后直接上传原始 PCM；关闭录音后停止入队并清理缓存。I2S 始终排空，不会在下次录音时发送很久以前的 DMA 数据。切换 USB 时的数据访问受到互斥保护。
 
-### 编译
+原始录音没有 VAD 门控、自动降噪或回声消除；同时播放时，麦克风可能拾取本机喇叭声音，这是正常声学串音。
 
-```bash
-./scripts/idf.sh build
-```
+## 按键
 
-### 烧录
+| 操作 | 功能 |
+| --- | --- |
+| 两个不同按键组成组合键 | 音频 ↔ 原生 Serial/JTAG |
+| BOOT 长按 5 秒 | 同上 |
+| BOOT 短按 | 无对话操作 |
+| 触摸键 1 | 参与组合键；无单独对话操作 |
+| 触摸键 2 单独松开 | 音量 -10 |
+| 触摸键 3 单独松开（有该通道的板型） | 音量 +10 |
 
-```bash
-# 自动检测串口
-./scripts/idf.sh flash
+全部松开后才能再次触发组合键；切换期间忽略重复请求。单键音量在松开时处理，避免组成组合键时误改音量。触摸通道、灵敏度和引脚见 `main/boards/esp-sparkbot/config.h`。
 
-# 指定串口
-./scripts/idf.sh -p COM3 flash
+## 构建
 
-# 手动烧录（完整命令）
-python -m esptool --chip esp32s3 -b 460800 \
-  --before default_reset --after hard_reset write_flash \
-  --flash_mode dio --flash_size 16MB --flash_freq 80m \
-  0x0        build/bootloader/bootloader.bin \
-  0x8000     build/partition_table/partition-table.bin \
-  0xd000     build/ota_data_initial.bin \
-  0x10000    build/hello_world.bin \
-  0x800000   build/generated_assets.bin
-```
+使用 **ESP-IDF ≥5.4** 和 ESP32-S3 工具链：
 
-### 查看日志
-
-```bash
-./scripts/idf.sh -p COM3 monitor
-# 退出: Ctrl + ]
-```
-
-## 首次使用
-
-1. 开机不再自动进入配网：有已保存 WiFi 时自动连接，否则离线待机；连接超时也不自动开启配网热点。
-2. 待机时长按 **触摸键 2（GPIO2）5 秒**，手动进入 WiFi 配网模式。
-3. 手机连接屏幕显示的 `Xiaozhi-XXXX` 热点，浏览器打开 `http://192.168.4.1`。
-4. 在网页中配置家庭 WiFi 凭据，完成后设备尝试连接。
-5. 开机及默认待机图标改为通用扬声器；USB 音频不依赖 WiFi 配网。
-
-## 豆包 API 配置
-
-**仓库中不保存任何密钥**（`sdkconfig` 已加入 `.gitignore`，`Kconfig` 默认值为空）。
-克隆后请在本地配置，二选一：
-
-**方式一：menuconfig（写入本地 sdkconfig，不会上传）**
-
-```bash
-idf.py menuconfig
-# Xiaozhi Assistant → Douyin/App AppID          填 App ID
-# Xiaozhi Assistant → Douyin/Access Key (Token) 填 Access Key
+```sh
+idf.py set-target esp32s3
+idf.py reconfigure
 idf.py build
+idf.py -p <PORT> flash
 ```
 
-**方式二：运行时写入 NVS（固件里也不带密钥）**
+依赖已精简到 codec、LVGL/字体、按键和 TinyUSB。更改后的 `main/idf_component.yml` 会在重新配置时触发组件管理器更新 `dependencies.lock`；不要手动编辑托管组件。
 
-在 `douyin` 命名空间下写入 `app_id` / `access_key`，
-`DouyinVoiceProtocol::OpenAudioChannel()` 会优先读取 NVS，为空时才回退到
-`CONFIG_DOUYIN_APP_ID` / `CONFIG_DOUYIN_ACCESS_KEY`。
+- SparkBot 选择独立的 `main/usb/firmware.cmake` 构建入口，不编译旧的 `application.cc`、`audio_service.cc`、协议、AFE、唤醒词、摄像头或底盘控制代码。旧多板型源码保留在仓库，不属于当前固件。
+- `USB_AUDIO_DEVICE` 自动选择 `TINYUSB_NO_DEFAULT_TASK`。应用管理 USB 任务并等待其协作退出，避免在持有 TinyUSB 内部锁时强行删除任务。
+- 确认 `USB_AUDIO_SPEAKER=y`、`USB_AUDIO_MIC=y`。已有本地 `sdkconfig` 不会被 `sdkconfig.defaults` 全部覆盖，应在 menuconfig 中检查。
+- 沿用原有 16MB 分区布局以保持 NVS 地址；旧 assets/model 分区不再参与此固件运行，也不需要刷新。
+- 编译后由 `scripts/package_firmware.py` 输出 `build/flash/` 烧录包。
 
-> `sdkconfig.defaults` 只保存非机密项（板型、分区、Flash 大小、语言、
-> 配网方式、豆包开关），不含任何凭据。
+### 日志接口与硬件注意事项
 
-API 端点：`wss://openspeech.bytedance.com/api/v3/realtime/dialogue`
-Resource ID：`volc.speech.dialog`
-App Key：`PlgvMymc7f3tQnJ6`
+音频模式独占原生 USB PHY，USB Serial/JTAG 串口会消失。默认使用独立 **UART1：TX=GPIO38、RX=GPIO48、115200 baud** 输出日志，需外接 USB-UART。UART0 GPIO43/44 已用于 LCD，不应作为当前板子的日志引脚。
 
-## 关键事件协议
+现有 `sdkconfig` 请检查控制台配置：
 
-| Event ID | 名称             | 说明                       |
-| -------- | ---------------- | -------------------------- |
-| 1        | StartConnection  | 客户端发起连接             |
-| 100      | StartSession     | 启动对话会话               |
-| 200      | TaskRequest      | 发送音频                   |
-| 350      | TTS_SENTENCE_START | 一句 TTS 开始             |
-| 351      | TTS_SENTENCE_END | 一句 TTS 音频结束          |
-| 359      | TTS_ENDED        | 全部 TTS 结束              |
-| 450      | ASR_INFO         | 用户开始说话（可用于打断） |
-| 451      | ASR_RESPONSE     | ASR 识别结果               |
-| 459      | ASR_ENDED        | ASR 结束                   |
-| 550      | CHAT_RESPONSE    | 流式回复文本（可多次）     |
-| 559      | CHAT_ENDED       | LLM 回复结束               |
-
-## 状态机
-
-```
-unknown → starting → wifi_configuring → idle
-                                    ↓
-                          (user input) → listening → speaking → idle/listening
+```text
+CONFIG_ESP_CONSOLE_UART_CUSTOM=y
+CONFIG_ESP_CONSOLE_UART_NUM=1
+CONFIG_ESP_CONSOLE_UART_TX_GPIO=38
+CONFIG_ESP_CONSOLE_UART_RX_GPIO=48
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 ```
 
-设备状态定义在 `application.h`：
-- `kDeviceStateIdle`
-- `kDeviceStateConnecting`
-- `kDeviceStateListening`
-- `kDeviceStateSpeaking`
+GPIO46 在本板同时关联 PA/背光。独立音频服务保持 codec 双工接口开启，不在切换中关闭 PA 或启用冲突的背光 PWM。摄像头和底盘 UART 均不初始化。
 
-## USB 音箱 + 麦克风（USB 复合音频设备）
+## 录音检查
 
-设备可作为一个 **USB 复合音频设备** 直接插到 PC 上，无需安装驱动：
+1. 在电脑输入设备中选择 **ESP32-S3 USB Speaker+Mic** 对应的麦克风，允许录音应用访问麦克风。
+2. 打开录音应用并选择该输入，对麦克风讲话；不需要按键开始对话。
+3. UART 应出现 `USB microphone stream started`。每 5 秒的 `UsbBridge` 日志包含：
+   - `host_recording=1`：主机已开启麦克风接口。
+   - `blocks`：成功处理的采集块数（每块 10ms，不是 USB 包数）。
+   - `failures`：codec 读取或 USB 入队失败次数。
+   - `peak`：原始 PCM 峰值；讲话时应有明显变化。
+4. `host_recording=0` 时先检查电脑选中的输入设备/权限。持续 `peak=0` 时检查 ADC、麦克风接线和 codec 日志；出现 `Microphone read failed` 时采集任务不会再把旧数据当成有效音频发送。
+5. 关闭录音应看到 `stream stopped`；重新打开后应立刻恢复，无需重启。
 
-| 方向 | 说明 |
-| ---- | ---- |
-| PC → 设备 | PC 枚举出「USB 扬声器」，PC 播放的音频由设备本地喇叭播出（带反馈通道，48kHz/16bit/单声道） |
-| 设备 → PC | PC 枚举出「USB 麦克风」，设备麦克风音频上传给 PC（48kHz/16bit/单声道） |
+## 测试与板端验收
 
-### 开启方式
+主机模拟测试（需要 C++20 编译器）：
 
-```bash
-idf.py menuconfig
-# USB_AUDIO_DEVICE_CONFIG → USB Audio Device (Speaker + Microphone) = y
-#   Enable USB Speaker (PC -> device speaker)          = y
-#   Enable USB Microphone (device mic -> PC)           = y
-idf.py build && idf.py flash monitor
+```sh
+python tests/test_usb_hot_switch.py
 ```
 
-也可以在 `sdkconfig` 中直接写：
+共享盘禁止执行时可用 `--run-dir <本机目录>`。测试覆盖原始麦克风分流、录音开关、读取失败、热切换时的数据丢弃、播放补静音、20 次模式往返、失败分支、组合键和 UI 状态。**模拟接口不代表 USB 枚举、I2S 或实机录音已通过验收。**
 
-```
-CONFIG_USB_AUDIO_DEVICE=y
-CONFIG_USB_AUDIO_SPEAKER=y
-CONFIG_USB_AUDIO_MIC=y
-```
+板端请验证：
 
-### 说明
+1. 音频模式出现 VID/PID `303A:4011` 的音箱和麦克风，独立播放、独立录音、同时播放录音均正常。
+2. 保持数据线不动，切换到原生 Serial/JTAG，验证串口/OpenOCD；这不是旧实现的 `303A:4012` 模拟 CDC。
+3. 关闭调试会话，重新按组合键返回音频，再次播放和录音。
+4. 重复至少 20 次并持续录音数分钟，确认无持续丢块、内存泄漏、看门狗复位或声音中断。
+5. 分别在两种模式下复位，确认恢复已保存的模式，并能再次切回音频。
 
-- 基于 TinyUSB 的 UAC2 设备类（`espressif/esp_tinyusb`，会在构建时自动拉取）。
-- 音频模式下 USB-OTG 独占内部 PHY，**同一原生 USB 口的 USB-Serial-JTAG 串口会消失**。SparkBot 支持按键热切换到真正的原生 USB Serial/JTAG，不使用 TinyUSB CDC 模拟；音频模式调试仍需独立 UART。
-- 采样率固定 48kHz、16bit、单声道；端点最大包长 98 字节（96 字节音频 + 一个样本余量）。音量由本地控制，不声明未实现的 USB 音量/静音控制。
-- Speaker/Mic 开关控制数据通路，USB 始终枚举两个接口；关闭 Mic 时输出静音。
-- `sdkconfig.defaults` 默认开启 USB 音箱和麦克风；首次启动使用音频模式，之后按 NVS `otg/disabled` 保存的上次成功模式启动。已有本地 `sdkconfig` 不会被默认值覆盖，需要在 menuconfig 中开启 `USB_AUDIO_DEVICE`、`USB_AUDIO_SPEAKER` 和 `USB_AUDIO_MIC`。
-- `USB_AUDIO_DEVICE` 自动选择 `TINYUSB_NO_DEFAULT_TASK`：应用使用可协作退出的 USB 任务，先停止任务再卸载栈和 PHY，避免直接删除正在持锁的 TinyUSB 默认任务。
-- 设备本地正在播 TTS 时，USB 音箱任务会主动让路，避免两路声音叠加。
+### 恢复烧录
 
-### 按键操作与退出 OTG 模式
+固件正常时可先切到原生 Serial/JTAG 再使用烧录工具。若固件未运行或 USB 切换异常：按住 **BOOT(GPIO0)**，按 **RESET/EN**（或断电上电），再松开 BOOT，选择 ROM 下载接口烧录。
 
-本设备只有 **2 个触摸键**（TOUCH_PAD_NUM1 / TOUCH_PAD_NUM2）。触摸键的创建与事件分发使用 `main/boards/common/button.cc` 中的 `TouchButton`（对应参考工程 `esp_sparkbot/example/factory_demo_v1` 的 `bsp_touch_button_create()`：touch_element + touch_button，阈值灵敏度分别为 0.04 / 0.1）。
-
-| 按键 | 作用 |
-| ---- | ---- |
-| 触摸键 1 | 空闲时开始对话；收音中停止收音；播报中打断播报 |
-| 触摸键 2 | 音量 -10，并显示「音量 xx%」 |
-| **触摸键 1 + 触摸键 2 同时按** | **USB 音频 ↔ 原生 USB Serial/JTAG 双向热切换** |
-| BOOT (GPIO0) | 短按开始 / 停止对话；长按 5 秒热切换 USB；也可与触摸键组成组合键 |
-
-本项目不做 WiFi 配网：所有按键都不会进入配网模式，WiFi 信息使用 NVS 中已保存的配置。
-
-**同时按两个触摸键，或 BOOT 长按 5 秒 => 双向热切换**（`ComboKeyDetector`，组合窗口 500ms）：
-
-- 不需要拔插 USB，也不执行 `esp_restart()`。电脑会看到软件断开和重新枚举，原有音频/串口/JTAG 会话会中断，需要应用重新打开设备。
-- 音频 → 原生 Serial/JTAG：禁止新的音频 I/O → 软件断开至少 250ms → 等待 USB 任务协作退出 → 卸载 TinyUSB 和 OTG PHY → 通过 `usb_new_phy(USB_PHY_CTRL_SERIAL_JTAG)` 交接内部 PHY。
-- 原生 Serial/JTAG → 音频：关闭原生 USB pads 并等待 250ms → 释放其 PHY → 重新安装 UAC2 栈和音频数据通路。即使以 JTAG 模式启动，重采样器和音频任务也已准备好。
-- 松开全部组合键后才能触发下一次切换；正在切换时忽略重复请求。USB 拔插只影响连接状态，不改变所选模式。
-- 成功切换后保存启动模式；保存失败会提示。若卸载或初始化留下不确定状态，停止继续交接并提示复位，不进行盲目重启。
-- 原生控制器恢复后可使用 USB JTAG/原生下载功能，但应用日志仍取决于 ESP-IDF 控制台配置；不会自动把 UART 日志重定向到 USB。电脑工具请求复位/进入下载模式属于工具自身行为，不是本热切换流程。
-
-相关文件：
-
-```
-main/boards/esp-sparkbot/sparkbot_keys.cc   组合键（同时按两个键）检测
-main/boards/esp-sparkbot/otg_mode.cc        USB PHY 双向交接任务 + 屏幕提示界面
-main/boards/esp-sparkbot/config.h           触摸键通道与灵敏度配置
-main/usb_audio.cc                            USB 复合音频设备（多监听者连接回调）
-```
-
-### 从 OTG 音频模式恢复烧录
-
-ESP-SPARKBOT 的 BOOT 键连接 GPIO0。通常不需要旧固件配合：
-
-1. 按住 **BOOT**。
-2. 按一下 **RESET/EN**；没有复位键时，保持 BOOT 按下并断电重新上电。
-3. 松开 BOOT，等待电脑重新识别 ROM 下载接口，重新选择实际出现的 COM 端口烧录。
-4. 烧录完成后正常复位，应用启用 USB 音频时该 COM 口会再次消失。
-
-使用连接 ESP32-S3 原生 USB（GPIO19=D-、GPIO20=D+）的数据口，不是仅供电接口。
-上述方式以未通过 eFuse 禁用 USB/ROM 下载且启动绑带满足芯片要求为前提；
-若板子另有 USB-UART 桥，也可经 UART0 配合 BOOT/RESET 烧录。
-
-固件正常运行时，可以先用组合键或 BOOT 长按切回原生 USB Serial/JTAG，再使用对应串口/JTAG 工具。
-如果固件未运行或提示 USB 切换失败，仍使用上述 BOOT + 硬件复位方式恢复。
-
-### 热切换板端验收
-
-主机模式管理/组合键测试：`python tests/test_usb_hot_switch.py`（需要 C++20 编译器；共享盘禁止执行时可用 `--run-dir` 指定本机目录）。该测试使用 SDK 模拟接口，不代替以下实机验收。
-
-1. 保持同一根 USB 数据线连接；确认音频模式出现 VID/PID `303A:4011` 的音箱和麦克风，播放和录音正常。
-2. 在播放/录音中按组合键：音频设备消失，出现芯片原生 USB Serial/JTAG（不是旧代码的 `303A:4012` 模拟 CDC）；验证 OpenOCD 可连接。
-3. 先关闭调试会话，再松开全部按键、重新按组合键：原生接口消失，音箱和麦克风重新出现；再次验证双向音频。
-4. 重复至少 20 次，检查 UART 日志、空闲堆内存和任务数，确认没有持续泄漏、看门狗复位或挂起。
-5. 分别在两种模式下复位，确认恢复上次成功选择的模式；特别验证以 JTAG 模式启动后能热切回音频。
-6. 检查 BOOT 长按、切换期间重复按键、未接 PC 时切换、实际拔插 USB 后的行为。
-
-## 已修复问题
-
-### 1. 豆包长回复时状态卡死
-
-**症状**：当豆包回复内容很长时，设备说完后无法回到 listening 状态。
-
-**原因**：`AudioService::on_playback_finished` 回调在播放队列清空时立即触发，但此时 `TTS_SENTENCE_END` (351) 或 `TTS_ENDED` (359) 事件尚未被 WebSocket 任务处理完，导致 `tts_ended_` 仍为 `false`，状态转换失败后无重试机制。
-
-**修复**（`main/application.cc`）：在 TTS stop 事件处理中，如果发现播放队列已经为空，直接执行状态转换：
-
-```cpp
-// TTS 停止时，如果播放队列已空，立即转换状态
-if (audio_service_.IsPlaybackQueueEmpty() && GetDeviceState() == kDeviceStateSpeaking) {
-    if (listening_mode_ == kListeningModeManualStop) {
-        SetDeviceState(kDeviceStateIdle);
-    } else {
-        SetDeviceState(kDeviceStateListening);
-    }
-}
-```
-
-### 2. 文本流式刷新延迟
-
-**症状**：豆包每说一段，屏幕上的文字才一次性更新，造成语音与文字不同步。
-
-**原因**：`chat_text` 消息通过 `Schedule()` 异步队列处理，导致 `display->SetChatMessage()` 调用时机不确定。
-
-**修复**（`main/application.cc`）：去掉 `Schedule()`，直接同步调用：
-
-```cpp
-} else if (strcmp(type->valuestring, "chat_text") == 0) {
-    auto text = cJSON_GetObjectItem(root, "text");
-    if (cJSON_IsString(text) && strlen(text->valuestring) > 0) {
-        display->SetChatMessage("assistant", text->valuestring);
-    }
-}
-```
-
-## 编译产物打包（build/flash）
-
-编译完成后会自动把所有需要烧写的文件收集到 `build/flash/`，并生成合并固件：
-
-```
-build/flash/
-├── 00_bootloader.bin         0x000000
-├── 01_partition-table.bin    0x008000
-├── 02_ota_data_initial.bin   0x00d000
-├── 03_hello_world.bin        app 本体（OTA 升级包用）
-├── 04_generated_assets.bin   assets 资源分区
-├── firmware.bin              完整合并镜像（烧到 0x0）
-├── flash_args.txt            偏移清单
-├── flash.sh / flash.bat      一键烧录完整固件
-```
-
-| 用途 | 文件 |
-| ---- | ---- |
-| 完整刷机（新板/改过分区表） | `firmware.bin` 烧到 `0x0` |
-| 逐文件烧录 | `flash.sh` / `flash.bat` |
-| 只升级 app（OTA） | `03_hello_world.bin` 烧到 ota_0 偏移 |
-
-手动执行（一般无需，编译已自动跑）：
-
-```bash
-./scripts/idf.sh build
-C:/Espressif/tools/python/v5.5.3/venv/Scripts/python.exe scripts/package_firmware.py -b build
-```
-
-## 分区表（16MB Flash）
-
-| Name    | Type | SubType | Offset   | Size     | 说明           |
-| ------- | ---- | ------- | -------- | -------- | -------------- |
-| nvs     | data | nvs     | 0x9000   | 0x4000   | 配置存储       |
-| otadata | data | ota     | 0xd000   | 0x2000   | OTA 状态       |
-| phy_init| data | phy     | 0xf000   | 0x1000   | RF 校准        |
-| ota_0   | app  | ota_0   | 0x10000  | 0x3f0000 | 应用程序 (~4MB)|
-| ota_1   | app  | ota_1   | -        | 0x3f0000 | OTA 备份       |
-| assets  | data | spiffs  | 0x800000 | 8MB      | 资源（字库等） |
-
-## 常见问题
-
-### 烧录后启动失败 / 屏幕不亮
-
-确认烧录时**包含 `generated_assets.bin` 到 0x800000**。字库等资源在 SPIFFS 分区，未烧录会导致 LVGL 找不到字体而崩溃。
-
-### 启动后无串口日志
-
-- 检查 USB 线是否支持数据传输（非仅充电线）
-- 确认串口驱动已安装（CH340 / CP210x）
-- 串口监视器需要选 115200 8N1
-
-### 状态卡在 speaking
-
-参考上文"已修复问题"第 1 条。如修改后仍有问题，可用 `./scripts/idf.sh -p COM3 monitor` 抓取 `TTS stop` 与 `Playback finished callback` 的时序日志。
-
-## 开发工具链
-
-- ESP-IDF v5.5.3
-- Python 3.x（在 ESP-IDF venv 中）
-- CMake / Ninja
-- 目标芯片：ESP32-S3
+此方式要求 eFuse 未禁用相应 USB/ROM 下载功能。使用连接 ESP32-S3 原生 USB GPIO19/20 的数据接口。

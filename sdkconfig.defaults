@@ -1,46 +1,27 @@
-##
-## 项目默认配置（非机密）。首次编译时 IDF 会用它生成 sdkconfig。
-## 机密信息（WiFi 密码、Douyin APP_ID / ACCESS_KEY）请在
-## `idf.py menuconfig` 中本地填写，sdkconfig 已被 .gitignore 排除。
-## 也可以在设备上通过 Settings（app_id / access_key）运行时写入。
-##
-## 编译目标
+## Standalone ESP-SPARKBOT USB audio firmware (no voice assistant or network).
 CONFIG_IDF_TARGET="esp32s3"
-
-## 板型：ESP-SPARKBOT
 CONFIG_BOARD_TYPE_ESP_SPARKBOT=y
 
-## Flash / 分区
+## Keep the existing flash layout/NVS addresses for upgrades.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/v2/16m.csv"
 
-## 显示 / 资源
-CONFIG_FLASH_DEFAULT_ASSETS=y
+## UI uses a built-in font; no downloaded assets or speech models are required.
+CONFIG_FLASH_NONE_ASSETS=y
 CONFIG_LANGUAGE_ZH_CN=y
 
-## 音频
-CONFIG_USE_AFE_WAKE_WORD=y
-CONFIG_USE_AUDIO_PROCESSOR=y
-
-## USB 音频：首次开机进入 OTG 音箱 + 麦克风模式，之后记住按键选择。
-## 组合键或 BOOT 长按可与原生 Serial/JTAG 双向热切换，无需拔线/重启。
-## 两种模式共用内部 PHY，不能同时使用。
+## Native 48kHz / mono / 16-bit USB speaker + microphone.
+## Chord or BOOT long press switches to/from native Serial/JTAG without reboot.
 CONFIG_USB_AUDIO_DEVICE=y
 CONFIG_USB_AUDIO_SPEAKER=y
 CONFIG_USB_AUDIO_MIC=y
+CONFIG_TINYUSB_NO_DEFAULT_TASK=y
 
-## 网络配网：热点配网
-CONFIG_USE_HOTSPOT_WIFI_PROVISIONING=y
-CONFIG_MQTT_PROTOCOL_311=y
-CONFIG_MQTT_TRANSPORT_SSL=y
-CONFIG_MQTT_TRANSPORT_WEBSOCKET=y
-CONFIG_MQTT_TRANSPORT_WEBSOCKET_SECURE=y
-
-## 摄像头（DVP）
-CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE=y
-
-## 豆包（Douyin）实时语音：这里只开关，凭据留空由本地/运行时填写
-CONFIG_DOUYIN_VOICE=y
-CONFIG_DOUYIN_APP_ID=""
-CONFIG_DOUYIN_ACCESS_KEY=""
+## UART1 logs stay available while OTG owns the internal USB PHY.
+## UART0 GPIO43/44 are LCD DC/CS; UART1 GPIO38/48 is no longer used by a chassis.
+CONFIG_ESP_CONSOLE_UART_CUSTOM=y
+CONFIG_ESP_CONSOLE_UART_NUM=1
+CONFIG_ESP_CONSOLE_UART_TX_GPIO=38
+CONFIG_ESP_CONSOLE_UART_RX_GPIO=48
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200

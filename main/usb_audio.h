@@ -41,6 +41,10 @@ public:
     bool IsConnected() const { return connected_; }  // 已挂载到主机
     bool IsSpeakerEnabled() const { return config_.speaker_enabled; }
     bool IsMicEnabled() const { return config_.mic_enabled; }
+    bool IsMicrophoneActive() const {
+        return config_.mic_enabled && initialized_.load() && running_.load() &&
+               connected_.load() && mic_streaming_.load();
+    }
 
     int sample_rate() const { return config_.sample_rate; }
     int channels() const { return config_.channels; }
