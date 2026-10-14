@@ -836,6 +836,7 @@ config USB_AUDIO_DEVICE
     select TINYUSB_HID_ENABLED
     select LV_USE_BAR
     select LV_USE_LINE
+    select LV_FONT_MONTSERRAT_36
     help
         将设备作为一个 USB 复合音频设备连接到 PC：
           - USB Speaker    : PC 播放的音频由设备本地扬声器播出
