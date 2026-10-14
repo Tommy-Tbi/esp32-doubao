@@ -69,7 +69,7 @@ python -m esptool --chip esp32s3 -b 460800 \
   0x0        build/bootloader/bootloader.bin \
   0x8000     build/partition_table/partition-table.bin \
   0xd000     build/ota_data_initial.bin \
-  0x20000    build/hello_world.bin \
+  0x10000    build/hello_world.bin \
   0x800000   build/generated_assets.bin
 ```
 
@@ -264,6 +264,35 @@ if (audio_service_.IsPlaybackQueueEmpty() && GetDeviceState() == kDeviceStateSpe
 }
 ```
 
+## 编译产物打包（build/flash）
+
+编译完成后会自动把所有需要烧写的文件收集到 `build/flash/`，并生成合并固件：
+
+```
+build/flash/
+├── 00_bootloader.bin         0x000000
+├── 01_partition-table.bin    0x008000
+├── 02_ota_data_initial.bin   0x00d000
+├── 03_hello_world.bin        app 本体（OTA 升级包用）
+├── 04_generated_assets.bin   assets 资源分区
+├── firmware.bin              完整合并镜像（烧到 0x0）
+├── flash_args.txt            偏移清单
+├── flash.sh / flash.bat      一键烧录完整固件
+```
+
+| 用途 | 文件 |
+| ---- | ---- |
+| 完整刷机（新板/改过分区表） | `firmware.bin` 烧到 `0x0` |
+| 逐文件烧录 | `flash.sh` / `flash.bat` |
+| 只升级 app（OTA） | `03_hello_world.bin` 烧到 ota_0 偏移 |
+
+手动执行（一般无需，编译已自动跑）：
+
+```bash
+./scripts/idf.sh build
+C:/Espressif/tools/python/v5.5.3/venv/Scripts/python.exe scripts/package_firmware.py -b build
+```
+
 ## 分区表（16MB Flash）
 
 | Name    | Type | SubType | Offset   | Size     | 说明           |
@@ -271,7 +300,7 @@ if (audio_service_.IsPlaybackQueueEmpty() && GetDeviceState() == kDeviceStateSpe
 | nvs     | data | nvs     | 0x9000   | 0x4000   | 配置存储       |
 | otadata | data | ota     | 0xd000   | 0x2000   | OTA 状态       |
 | phy_init| data | phy     | 0xf000   | 0x1000   | RF 校准        |
-| ota_0   | app  | ota_0   | 0x20000  | 0x3f0000 | 应用程序 (~4MB)|
+| ota_0   | app  | ota_0   | 0x10000  | 0x3f0000 | 应用程序 (~4MB)|
 | ota_1   | app  | ota_1   | -        | 0x3f0000 | OTA 备份       |
 | assets  | data | spiffs  | 0x800000 | 8MB      | 资源（字库等） |
 
