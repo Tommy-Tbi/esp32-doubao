@@ -7,6 +7,7 @@
 #include <atomic>
 #include <mutex>
 #include <vector>
+#include "usb/usb_media_control.h"
 
 // USB Audio Device：USB 复合音频设备（USB Speaker + USB Microphone）
 //
@@ -32,6 +33,9 @@ public:
     bool Initialize(const Config& config, bool enable = true);
     // Reinstall using the immutable configuration prepared at boot.
     bool Resume();
+
+    // Queue one USB Consumer Play/Pause click; false if unavailable/busy.
+    bool RequestPlayPause();
 
     void Start();
     void Stop();
@@ -87,6 +91,7 @@ private:
     std::atomic<bool> connected_{false};
     std::atomic<bool> mic_streaming_{false};
     Config config_;
+    UsbMediaControl media_;
 
     bool task_running_ = false;  // Accessed only by the lifecycle owner
     std::atomic<bool> task_stop_{false};

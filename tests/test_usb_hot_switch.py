@@ -186,13 +186,17 @@ int main() {
     assert(codec.output == std::vector<int16_t>(480, 0));  // detach mid-fetch
     usb.on_fetch = {};
 
-    // UI: a real column layout, one reusable tree, explicit state-specific copy.
+    // Audio uses the live base dashboard, never a covering static overlay.
     mode.ShowOverlay(OtgMode::PanelState::Audio);
+    assert(!mode.overlay_ ||
+           (static_cast<lv_obj_t*>(mode.overlay_)->flags & LV_OBJ_FLAG_HIDDEN));
+    // Transient UI: one reusable column tree and state-specific copy.
+    mode.ShowOverlay(OtgMode::PanelState::ToNative);
     auto* panel = static_cast<lv_obj_t*>(mode.overlay_);
     assert(panel->flow == LV_FLEX_FLOW_COLUMN);
-    assert(static_cast<lv_obj_t*>(mode.title_)->text == "音箱 + 麦克风");
+    assert(static_cast<lv_obj_t*>(mode.title_)->text == "切换到调试模式");
     int count = created_objects;
-    mode.ShowOverlay(OtgMode::PanelState::Audio);
+    mode.ShowOverlay(OtgMode::PanelState::ToNative);
     assert(created_objects == count);
     mode.ShowOverlay(OtgMode::PanelState::ToNative);
     assert(static_cast<lv_obj_t*>(mode.title_)->text == "切换到调试模式");
@@ -204,11 +208,13 @@ int main() {
     mode.HideOverlay();
     assert(panel->flags & LV_OBJ_FLAG_HIDDEN);
     mode.ShowOverlay(OtgMode::PanelState::Audio);
+    assert(panel->flags & LV_OBJ_FLAG_HIDDEN);
+    mode.ShowOverlay(OtgMode::PanelState::ToAudio);
     assert(!(panel->flags & LV_OBJ_FLAG_HIDDEN));
     lv_event_t event{panel->user_data};
     panel->on_delete(&event);
     assert(!mode.overlay_ && !mode.title_ && !mode.hint_);
-    mode.ShowOverlay(OtgMode::PanelState::Audio);
+    mode.ShowOverlay(OtgMode::PanelState::ToNative);
     assert(mode.overlay_ && created_objects == count + 5);
 
     // Duplicate status refreshes must not erase the live result notification.
@@ -226,6 +232,8 @@ int main() {
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=shutil.which("clang++") or shutil.which("g++"))
+    parser.add_argument("--compile-only", action="store_true",
+                        help="compile without executing (for no-execute shares)")
     parser.add_argument("--run-dir", type=Path,
                         help="copy executable here if the source share disallows execution")
     args = parser.parse_args()
@@ -249,6 +257,9 @@ def main():
     subprocess.run([args.cxx, "-std=c++20", "-finput-charset=UTF-8", "-UNDEBUG",
                     "-I" + str(out), "-I" + str(ROOT / "tests"),
                     "-I" + str(ROOT / "main"), str(source), "-o", str(binary)], check=True)
+    if args.compile_only:
+        print("USB host tests compiled; execution skipped")
+        return
     if args.run_dir:
         args.run_dir.mkdir(parents=True, exist_ok=True)
         run_binary = args.run_dir.resolve() / binary.name

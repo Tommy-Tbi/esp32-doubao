@@ -34,6 +34,15 @@
 #define EPNUM_SPK_OUT 0x01
 #define EPNUM_SPK_FB_IN 0x81
 #define EPNUM_MIC_IN 0x82
+#define ITF_MEDIA 4
+#define EPNUM_MEDIA_IN 0x83
+
+static const uint8_t kMediaReportDesc[] = { TUD_HID_REPORT_DESC_CONSUMER() };
+static const uint8_t kMediaDesc[] = {
+    TUD_HID_DESCRIPTOR(ITF_MEDIA, 5, HID_ITF_PROTOCOL_NONE,
+        sizeof(kMediaReportDesc), EPNUM_MEDIA_IN, 2, 10),
+};
+static_assert(CFG_TUD_HID == 1);
 
 // Deliberately no Feature Unit: volume is controlled locally. Do not advertise
 // mute/volume/connector controls unless their class requests are implemented.
@@ -71,9 +80,10 @@ static const uint8_t kMicDesc[] = {
 static_assert(sizeof(kSpeakerDesc) == CFG_TUD_AUDIO_FUNC_1_DESC_LEN);
 static_assert(sizeof(kMicDesc) == CFG_TUD_AUDIO_FUNC_2_DESC_LEN);
 static_assert(CFG_TUD_AUDIO == 2);
-static constexpr size_t kConfigLen = TUD_CONFIG_DESC_LEN + sizeof(kSpeakerDesc) + sizeof(kMicDesc);
+static constexpr size_t kConfigLen = TUD_CONFIG_DESC_LEN + sizeof(kSpeakerDesc) +
+    sizeof(kMicDesc) + sizeof(kMediaDesc);
 static uint8_t kDescConfig[kConfigLen] = {
-    TUD_CONFIG_DESCRIPTOR(1, 4, 0, kConfigLen, 0, 250),
+    TUD_CONFIG_DESCRIPTOR(1, 5, 0, kConfigLen, 0, 250),
 };
 static const tusb_desc_device_t kDescDevice = {
     .bLength = sizeof(tusb_desc_device_t),
@@ -85,7 +95,7 @@ static const tusb_desc_device_t kDescDevice = {
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = 0x303A,
     .idProduct = 0x4011,
-    .bcdDevice = 0x0101,
+    .bcdDevice = 0x0102,
     .iManufacturer = 1,
     .iProduct = 2,
     .iSerialNumber = 3,
@@ -94,9 +104,20 @@ static const tusb_desc_device_t kDescDevice = {
 static const char kLanguage[] = {0x09, 0x04};
 static const char* kStrings[] = {
     kLanguage, "ESP32-S3", "ESP32-S3 USB Speaker+Mic", "0001", "UAC2 Speaker+Mic",
+    "Media Control",
 };
 
 extern "C" {
+const uint8_t* tud_hid_descriptor_report_cb(uint8_t instance) {
+    return instance == 0 ? kMediaReportDesc : nullptr;
+}
+uint16_t tud_hid_get_report_cb(uint8_t, uint8_t, hid_report_type_t,
+                             uint8_t*, uint16_t) {
+    return 0;  // No polled status or feature reports.
+}
+void tud_hid_set_report_cb(uint8_t, uint8_t, hid_report_type_t,
+                           const uint8_t*, uint16_t) {}
+
 void tud_mount_cb(void) { UsbAudio::GetInstance().OnMounted(); }
 void tud_umount_cb(void) { UsbAudio::GetInstance().OnUnmounted(); }
 
@@ -176,6 +197,9 @@ bool UsbAudio::Initialize(const Config& config, bool enable) {
     }
     memcpy(kDescConfig + TUD_CONFIG_DESC_LEN, kSpeakerDesc, sizeof(kSpeakerDesc));
     memcpy(kDescConfig + TUD_CONFIG_DESC_LEN + sizeof(kSpeakerDesc), kMicDesc, sizeof(kMicDesc));
+    memcpy(kDescConfig + TUD_CONFIG_DESC_LEN + sizeof(kSpeakerDesc) + sizeof(kMicDesc),
+        kMediaDesc, sizeof(kMediaDesc));
+    media_.Reset();
     const tinyusb_config_t tusb_config = {
         .device_descriptor = &kDescDevice,
         .string_descriptor = kStrings,
@@ -218,7 +242,16 @@ bool UsbAudio::StartUsbTask() {
     // Never delete a task while it owns TinyUSB FIFO/callback mutexes.
     task_running_ = xTaskCreatePinnedToCore([](void* arg) {
         auto* self = static_cast<UsbAudio*>(arg);
-        while (!self->task_stop_.load()) tud_task_ext(10, false);
+        while (!self->task_stop_.load()) {
+            tud_task_ext(10, false);
+            self->media_.Poll(self->running_ && self->connected_,
+                tud_hid_ready(), [](uint16_t usage) {
+                    const uint8_t report[] = {
+                        static_cast<uint8_t>(usage), static_cast<uint8_t>(usage >> 8)
+                    };
+                    return tud_hid_report(0, report, sizeof(report));
+                });
+        }
         xSemaphoreGive((SemaphoreHandle_t)self->task_done_);
         vTaskDelete(nullptr);
     }, "usb_audio", 4096, this, 5, nullptr, 0) == pdPASS;
@@ -237,6 +270,12 @@ bool UsbAudio::Resume() {
     return configured_ && Initialize(config_);
 }
 
+bool UsbAudio::RequestPlayPause() {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    if (!initialized_ || !running_ || !connected_ || !config_.speaker_enabled) return false;
+    return media_.Request();
+}
+
 void UsbAudio::Start() { if (initialized_) running_ = true; }
 void UsbAudio::Stop() { running_ = false; }
 
@@ -249,6 +288,7 @@ bool UsbAudio::Uninstall() {
     tud_disconnect();
     vTaskDelay(pdMS_TO_TICKS(250));  // Host must observe a real detach.
     StopUsbTask();
+    media_.Reset();
     connected_ = false;
     mic_streaming_ = false;
     const esp_err_t err = tinyusb_driver_uninstall();
@@ -328,6 +368,7 @@ void UsbAudio::OnMounted() {
 }
 void UsbAudio::OnUnmounted() {
     if (!initialized_) return;
+    media_.Reset();
     connected_ = false;
     mic_streaming_ = false;
     ESP_LOGI(TAG, "USB host disconnected");

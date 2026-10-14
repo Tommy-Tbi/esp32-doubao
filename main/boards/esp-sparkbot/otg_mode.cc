@@ -235,6 +235,12 @@ void OtgMode::SetUsbStatus(const char* text) {
 
 void OtgMode::ShowOverlay(PanelState state) {
     if (!display_) return;
+    // The audio dashboard belongs to UsbDisplay. Only transient/error states
+    // need an overlay; a static audio panel would cover live volume/mic status.
+    if (state == PanelState::Audio) {
+        HideOverlay();
+        return;
+    }
     DisplayLockGuard lock(display_);
     if (overlay_ && panel_state_ == state) return;
 

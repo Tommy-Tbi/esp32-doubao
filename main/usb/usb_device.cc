@@ -1,5 +1,6 @@
 #include "usb_device.h"
 #include "usb_audio_bridge.h"
+#include "usb_audio.h"
 #include "codecs/es8311_audio_codec.h"
 #include "boards/esp-sparkbot/config.h"
 #include "boards/esp-sparkbot/otg_mode.h"
@@ -10,7 +11,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <esp_err.h>
+#include <esp_timer.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
@@ -25,6 +28,10 @@ LV_FONT_DECLARE(font_puhui_14_1);
 constexpr const char* kKeyHint = "左右键同按 5 秒切换";
 
 namespace {
+constexpr const char* kVolumeFormat = "%d%%";
+constexpr const char* kMicInUse = "Mic in use";
+constexpr const char* kMicIdle = "Mic idle";
+
 class UsbDisplay : public Display {
 public:
     void Initialize() {
@@ -108,6 +115,8 @@ public:
         lv_label_set_text(status_, "SparkBot USB");
         body_ = label(LV_ALIGN_CENTER, 0);
         lv_label_set_text(body_, "音箱 + 麦克风\n连接电脑即可使用");
+        lv_obj_add_flag(body_, LV_OBJ_FLAG_HIDDEN);
+        InitializeAudioPanel(screen);
         footer_ = label(LV_ALIGN_BOTTOM_MID, -6);
         lv_obj_set_style_text_color(footer_, lv_color_hex(0x94A3B8), 0);
         lv_obj_set_style_text_font(footer_, &font_puhui_14_1, 0);
@@ -123,9 +132,16 @@ public:
     void SetStatus(const char* text) override {
         DisplayLockGuard lock(this);
         lv_label_set_text(status_, text && text[0] ? text : "SparkBot USB");
-        lv_label_set_text(body_, text && std::strcmp(text, "USB 调试") == 0 ?
-            "原生 Serial/JTAG\n左右键同按 5 秒\n返回 USB 音频" :
-            "音箱 + 麦克风\n连接电脑即可使用");
+        const bool audio = !text || !text[0] || std::strcmp(text, "USB 音频") == 0;
+        if (audio) {
+            lv_obj_remove_flag(audio_panel_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(body_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(audio_panel_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(body_, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(body_, std::strcmp(text, "USB 调试") == 0 ?
+                "原生 Serial/JTAG\n左右键同按 5 秒\n返回 USB 音频" : "");
+        }
     }
 
     void ShowNotification(const char* text, int duration_ms = 3000) override {
@@ -136,11 +152,114 @@ public:
         lv_timer_resume(notice_timer_);
     }
 
+    void UpdateAudioState(int volume, bool mic_in_use) {
+        volume = std::clamp(volume, 0, 100);
+        DisplayLockGuard lock(this);
+        if (volume != displayed_volume_) {
+            displayed_volume_ = volume;
+            char text[16];
+            snprintf(text, sizeof(text), kVolumeFormat, volume);
+            lv_label_set_text(volume_label_, text);
+            lv_bar_set_value(volume_bar_, volume, LV_ANIM_OFF);
+            const int waves = volume == 0 ? 0 : volume <= 33 ? 1 : volume <= 66 ? 2 : 3;
+            for (int i = 0; i < 3; ++i) {
+                if (i < waves) lv_obj_remove_flag(waves_[i], LV_OBJ_FLAG_HIDDEN);
+                else lv_obj_add_flag(waves_[i], LV_OBJ_FLAG_HIDDEN);
+            }
+            if (volume == 0) lv_obj_remove_flag(mute_slash_, LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_add_flag(mute_slash_, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (displayed_mic_ != static_cast<int>(mic_in_use)) {
+            displayed_mic_ = mic_in_use;
+            lv_label_set_text(mic_label_, mic_in_use ? kMicInUse : kMicIdle);
+            lv_obj_set_style_text_color(mic_label_,
+                lv_color_hex(mic_in_use ? 0x34D399 : 0x94A3B8), 0);
+            lv_obj_set_style_bg_color(mic_dot_,
+                lv_color_hex(mic_in_use ? 0x34D399 : 0x475569), 0);
+        }
+    }
+
 protected:
     bool Lock(int timeout_ms) override { return lvgl_port_lock(timeout_ms); }
     void Unlock() override { lvgl_port_unlock(); }
 
 private:
+    void InitializeAudioPanel(lv_obj_t* screen) {
+        audio_panel_ = lv_obj_create(screen);
+        lv_obj_set_size(audio_panel_, 216, 168);
+        // Align centered horizontally, with room above for USB mode status.
+        lv_obj_align(audio_panel_, LV_ALIGN_TOP_MID, 0, 38);
+        lv_obj_remove_flag(audio_panel_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(audio_panel_, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_pad_all(audio_panel_, 0, 0);
+        lv_obj_set_style_bg_color(audio_panel_, lv_color_hex(0x111C2A), 0);
+        lv_obj_set_style_border_width(audio_panel_, 0, 0);
+        lv_obj_set_style_radius(audio_panel_, 14, 0);
+
+        auto* icon = lv_obj_create(audio_panel_);
+        lv_obj_set_size(icon, 76, 60);
+        lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 8);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_pad_all(icon, 0, 0);
+        lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(icon, 0, 0);
+        // Vector icon avoids relying on symbol glyphs in the bundled CJK font.
+        auto line = [icon](const lv_point_precise_t* points, uint32_t count, uint32_t color) {
+            auto* obj = lv_line_create(icon);
+            lv_line_set_points(obj, points, count);
+            lv_obj_set_style_line_width(obj, 3, 0);
+            lv_obj_set_style_line_rounded(obj, true, 0);
+            lv_obj_set_style_line_color(obj, lv_color_hex(color), 0);
+            return obj;
+        };
+        static const lv_point_precise_t speaker[] = {
+            {8, 22}, {20, 22}, {34, 10}, {34, 50}, {20, 38}, {8, 38}, {8, 22}
+        };
+        static const lv_point_precise_t wave1[] = {{42, 22}, {46, 30}, {42, 38}};
+        static const lv_point_precise_t wave2[] = {{50, 16}, {57, 30}, {50, 44}};
+        static const lv_point_precise_t wave3[] = {{60, 10}, {69, 30}, {60, 50}};
+        static const lv_point_precise_t slash[] = {{6, 8}, {70, 52}};
+        line(speaker, 7, 0x38BDF8);
+        waves_[0] = line(wave1, 3, 0x38BDF8);
+        waves_[1] = line(wave2, 3, 0x38BDF8);
+        waves_[2] = line(wave3, 3, 0x38BDF8);
+        mute_slash_ = line(slash, 2, 0xFB7185);
+        lv_obj_add_flag(mute_slash_, LV_OBJ_FLAG_HIDDEN);
+
+        volume_label_ = lv_label_create(audio_panel_);
+        lv_obj_set_style_text_font(volume_label_, &font_puhui_20_4, 0);
+        lv_label_set_text(volume_label_, "--%");
+        lv_obj_align(volume_label_, LV_ALIGN_TOP_MID, 0, 76);
+        volume_bar_ = lv_bar_create(audio_panel_);
+        lv_obj_set_size(volume_bar_, 160, 8);
+        lv_obj_align(volume_bar_, LV_ALIGN_TOP_MID, 0, 110);
+        lv_bar_set_range(volume_bar_, 0, 100);
+        lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(0x334155), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(0x38BDF8), LV_PART_INDICATOR);
+        mic_label_ = lv_label_create(audio_panel_);
+        lv_obj_set_style_text_font(mic_label_, &font_puhui_14_1, 0);
+        lv_label_set_text(mic_label_, kMicIdle);
+        lv_obj_align(mic_label_, LV_ALIGN_TOP_MID, 8, 136);
+        mic_dot_ = lv_obj_create(audio_panel_);
+        lv_obj_set_size(mic_dot_, 8, 8);
+        lv_obj_set_style_radius(mic_dot_, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(mic_dot_, 0, 0);
+        lv_obj_set_style_pad_all(mic_dot_, 0, 0);
+        lv_obj_remove_flag(mic_dot_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(mic_dot_, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_align(mic_dot_, LV_ALIGN_TOP_LEFT, 30, 140);
+    }
+
+    lv_obj_t* audio_panel_ = nullptr;
+    lv_obj_t* volume_label_ = nullptr;
+    lv_obj_t* volume_bar_ = nullptr;
+    lv_obj_t* waves_[3] = {};
+    lv_obj_t* mute_slash_ = nullptr;
+    lv_obj_t* mic_label_ = nullptr;
+    lv_obj_t* mic_dot_ = nullptr;
+    int displayed_volume_ = -1;
+    int displayed_mic_ = -1;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
     lv_obj_t* status_ = nullptr;
@@ -169,12 +288,24 @@ public:
             AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR);
         ESP_ERROR_CHECK(bridge_.Initialize(codec_) ? ESP_OK : ESP_FAIL);
         ESP_ERROR_CHECK(bridge_.Start() ? ESP_OK : ESP_FAIL);
+        display_.UpdateAudioState(codec_->output_volume(), false);
         OtgMode::GetInstance().Begin(&display_);
         InitializeKeys();
     }
 
 public:
-    void PollKeys() { combo_.Poll(); }
+    void PollKeys() {
+        combo_.Poll();
+        const int64_t now = esp_timer_get_time();
+        if (now - last_ui_update_us_ < 100000) return;
+        last_ui_update_us_ = now;
+        int volume;
+        {
+            std::lock_guard<std::mutex> lock(volume_mutex_);
+            volume = codec_->output_volume();
+        }
+        display_.UpdateAudioState(volume, UsbAudio::GetInstance().IsMicrophoneActive());
+    }
 
 private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
@@ -184,11 +315,28 @@ private:
     ComboKeyDetector combo_;
     Button boot_{BOOT_BUTTON_GPIO, false, 5000, 0};
     TouchButton* touch_[TOUCH_BUTTON_NUM] = {};
+    int64_t last_media_touch_us_ = -350000;
+    int64_t last_ui_update_us_ = -100000;
+    std::mutex volume_mutex_;
+
+    void PlayPause() {
+        const int64_t now = esp_timer_get_time();
+        if (now - last_media_touch_us_ < 350000) return;
+        last_media_touch_us_ = now;
+        if (OtgMode::GetInstance().IsBlocked()) return;
+        const bool queued = UsbAudio::GetInstance().RequestPlayPause();
+        display_.ShowNotification(queued ? "Play/Pause requested" : "Media control unavailable", 1500);
+    }
 
     void ChangeVolume(int delta) {
-        codec_->SetOutputVolume(std::clamp(codec_->output_volume() + delta, 0, 100));
+        int volume;
+        {
+            std::lock_guard<std::mutex> lock(volume_mutex_);
+            codec_->SetOutputVolume(std::clamp(codec_->output_volume() + delta, 0, 100));
+            volume = codec_->output_volume();
+        }
         char text[32];
-        snprintf(text, sizeof(text), "音量 %d%%", codec_->output_volume());
+        snprintf(text, sizeof(text), "音量 %d%%", volume);
         display_.ShowNotification(text, 1500);
     }
 
@@ -209,6 +357,7 @@ private:
                 // Decide before PressUp clears the chord latch on its last key.
                 const bool chord = combo_.IsComboActive();
                 combo_.PressUp(i);
+                if (!chord && i == 0) PlayPause();
                 if (!chord && i == 1) ChangeVolume(-10);
                 if (!chord && i == 2) ChangeVolume(10);
             });
