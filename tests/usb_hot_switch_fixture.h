@@ -78,7 +78,7 @@ inline void vTaskDelay(int) {}
 inline void xTaskNotify(TaskHandle_t, uint32_t, int) { ++notifications; }
 struct StopLoop {};
 inline void xTaskNotifyWait(int, uint32_t, uint32_t*, uint32_t) { throw StopLoop{}; }
-inline int64_t esp_timer_get_time() { return now_us += 1000; }
+inline int64_t esp_timer_get_time() { return now_us; }
 
 struct Display {
     std::string status, notice;
@@ -95,6 +95,7 @@ struct lv_obj_t {
     void* user_data = nullptr;
 };
 inline int created_objects = 0;
+#define LV_FONT_DECLARE(name) inline int name = 0
 constexpr int LV_OBJ_FLAG_SCROLLABLE = 1, LV_SIZE_CONTENT = 0,
     LV_OPA_COVER = 255, LV_TEXT_ALIGN_CENTER = 0, LV_OBJ_FLAG_HIDDEN = 2,
     LV_OBJ_FLAG_CLICKABLE = 4, LV_OBJ_FLAG_IGNORE_LAYOUT = 8,
@@ -116,6 +117,7 @@ inline void* lv_event_get_user_data(lv_event_t* e) { return e->user_data; }
 inline int lv_color_hex(int v) { return v; }
 #define LV_VOID(name) template<class... T> inline void name(T...) {}
 LV_VOID(lv_obj_set_size) LV_VOID(lv_obj_center)
+LV_VOID(lv_obj_set_style_text_font)
 LV_VOID(lv_obj_set_flex_align) LV_VOID(lv_obj_set_style_pad_row)
 LV_VOID(lv_obj_set_style_shadow_width) LV_VOID(lv_obj_set_style_shadow_opa)
 LV_VOID(lv_obj_set_style_shadow_color) LV_VOID(lv_obj_set_height)

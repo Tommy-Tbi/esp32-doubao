@@ -20,7 +20,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-LV_FONT_DECLARE(font_puhui_basic_20_4);
+LV_FONT_DECLARE(font_puhui_20_4);
+LV_FONT_DECLARE(font_puhui_14_1);
+constexpr const char* kKeyHint = "左右键同按 5 秒切换";
 
 namespace {
 class UsbDisplay : public Display {
@@ -88,16 +90,16 @@ public:
         DisplayLockGuard lock(this);
         auto* screen = lv_display_get_screen_active(lcd);
         lv_obj_set_style_bg_color(screen, lv_color_hex(0x0B1320), 0);
-        lv_obj_set_style_text_font(screen, &font_puhui_basic_20_4, 0);
+        lv_obj_set_style_text_font(screen, &font_puhui_20_4, 0);
         lv_obj_set_style_text_color(screen, lv_color_hex(0xE2E8F0), 0);
         lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
         auto label = [screen](lv_align_t align, int y) {
             auto* result = lv_label_create(screen);
             lv_obj_set_width(result, LV_PCT(90));
-            lv_obj_set_style_text_font(result, &font_puhui_basic_20_4, 0);
+            lv_obj_set_style_text_font(result, &font_puhui_20_4, 0);
             lv_label_set_long_mode(result, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_align(result, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_style_text_line_space(result, 8, 0);
+            lv_obj_set_style_text_line_space(result, 2, 0);
             lv_obj_align(result, align, 0, y);
             return result;
         };
@@ -108,10 +110,11 @@ public:
         lv_label_set_text(body_, "音箱 + 麦克风\n连接电脑即可使用");
         footer_ = label(LV_ALIGN_BOTTOM_MID, -6);
         lv_obj_set_style_text_color(footer_, lv_color_hex(0x94A3B8), 0);
-        lv_label_set_text(footer_, "BOOT 长按切换");
+        lv_obj_set_style_text_font(footer_, &font_puhui_14_1, 0);
+        lv_label_set_text(footer_, kKeyHint);
         notice_timer_ = lv_timer_create([](lv_timer_t* timer) {
             auto* self = static_cast<UsbDisplay*>(lv_timer_get_user_data(timer));
-            lv_label_set_text(self->footer_, "BOOT 长按切换");
+            lv_label_set_text(self->footer_, kKeyHint);
             lv_timer_pause(timer);
         }, 3500, this);
         lv_timer_pause(notice_timer_);
@@ -121,13 +124,13 @@ public:
         DisplayLockGuard lock(this);
         lv_label_set_text(status_, text && text[0] ? text : "SparkBot USB");
         lv_label_set_text(body_, text && std::strcmp(text, "USB 调试") == 0 ?
-            "原生 Serial/JTAG\n长按 BOOT 5 秒\n返回 USB 音频" :
+            "原生 Serial/JTAG\n左右键同按 5 秒\n返回 USB 音频" :
             "音箱 + 麦克风\n连接电脑即可使用");
     }
 
     void ShowNotification(const char* text, int duration_ms = 3000) override {
         DisplayLockGuard lock(this);
-        lv_label_set_text(footer_, text);
+        lv_label_set_text(footer_, text ? text : "");
         lv_timer_set_period(notice_timer_, std::max(duration_ms, 1));
         lv_timer_reset(notice_timer_);
         lv_timer_resume(notice_timer_);
@@ -170,6 +173,9 @@ public:
         InitializeKeys();
     }
 
+public:
+    void PollKeys() { combo_.Poll(); }
+
 private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     UsbDisplay display_;
@@ -187,7 +193,6 @@ private:
     }
 
     void InitializeKeys() {
-        combo_.SetWindowMs(500);
         combo_.OnCombo([](uint32_t mask) { OtgMode::GetInstance().ToggleByKeys(mask); });
         boot_.OnPressDown([this]() { combo_.PressDown(COMBO_KEY_BOOT); });
         boot_.OnPressUp([this]() { combo_.PressUp(COMBO_KEY_BOOT); });
@@ -216,5 +221,8 @@ private:
 void RunUsbAudioDevice() {
     static UsbDevice device;
     device.Initialize();
-    for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+    for (;;) {
+        device.PollKeys();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
 }

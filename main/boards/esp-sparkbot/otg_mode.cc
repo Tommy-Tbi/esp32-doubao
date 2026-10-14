@@ -14,6 +14,9 @@
 
 #define TAG "OtgMode"
 
+LV_FONT_DECLARE(font_puhui_14_1);
+LV_FONT_DECLARE(font_puhui_20_4);
+
 namespace {
 constexpr uint32_t kConnectionChanged = 1;
 constexpr uint32_t kToggle = 2;
@@ -249,8 +252,10 @@ void OtgMode::ShowOverlay(PanelState state) {
         lv_obj_set_flex_flow(overlay, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(overlay, LV_FLEX_ALIGN_START,
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_all(overlay, 12, 0);
-        lv_obj_set_style_pad_row(overlay, 8, 0);
+        lv_obj_set_style_pad_all(overlay, 8, 0);
+        lv_obj_set_style_pad_row(overlay, 6, 0);
+        // Compact body font and spacing keep all six lines clear of status/footer.
+        lv_obj_set_style_text_font(overlay, &font_puhui_14_1, 0);
         lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(overlay, lv_color_hex(0x111C2A), 0);
         lv_obj_set_style_radius(overlay, 14, 0);
@@ -265,12 +270,13 @@ void OtgMode::ShowOverlay(PanelState state) {
             lv_obj_set_height(label, LV_SIZE_CONTENT);
             lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_style_text_line_space(label, 3, 0);
+            lv_obj_set_style_text_line_space(label, 2, 0);
             lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
             return label;
         };
         badge_ = make_label(0x38BDF8);
         title_ = make_label(0xF8FAFC);
+        lv_obj_set_style_text_font(static_cast<lv_obj_t*>(title_), &font_puhui_20_4, 0);
         detail_ = make_label(0xCBD5E1);
         hint_ = make_label(0x94A3B8);
         overlay_ = overlay;
@@ -286,7 +292,7 @@ void OtgMode::ShowOverlay(PanelState state) {
     const char* badge = "USB AUDIO";
     const char* title = "音箱 + 麦克风";
     const char* detail = "PC 音频由本机播放\n麦克风同步传回 PC";
-    const char* hint = "双键切换调试\n长按 BOOT 5 秒切换";
+    const char* hint = "左右键同按 5 秒切换\n或长按 BOOT 5 秒";
     uint32_t accent = 0x38BDF8;
     if (state == PanelState::ToAudio || state == PanelState::ToNative) {
         badge = "SWITCHING";

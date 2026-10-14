@@ -32,66 +32,49 @@ std::string ComboKeyDetector::Describe(uint32_t mask) {
 }
 
 void ComboKeyDetector::PressDown(int key_id) {
-    if (key_id < 0 || key_id >= 31) {
-        return;
-    }
-
-    uint32_t combo_mask = 0;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const uint32_t bit = 1u << key_id;
-        if (pressed_mask_ & bit) {
-            return;  // 已经在按下状态，忽略重复事件
-        }
-
-        const int held = __builtin_popcount(pressed_mask_ & ~kComboLatchBit);
-        const int64_t now = esp_timer_get_time();
-        pressed_mask_ |= bit;
-
-        // 条件一：第二个键按下时第一个键仍按着（真正的同时按）
-        const bool overlap = held >= 1;
-        // 条件二：另一个键在窗口时间内被按下（快速先后按两个不同键）
-        const bool quick = (last_key_ >= 0 && last_key_ != key_id) &&
-                           (now - last_press_us_) <= static_cast<int64_t>(window_ms_) * 1000;
-        // One handoff per chord. A third key or a re-press while another key
-        // remains held must not immediately switch back to the previous mode.
-        if ((overlap || quick) && !(pressed_mask_ & kComboLatchBit)) {
-            combo_mask = pressed_mask_ & ~kComboLatchBit;
-            pressed_mask_ |= kComboLatchBit;
-        }
-        last_key_ = key_id;
-        last_press_us_ = now;
-    }
-
-    if (combo_mask != 0) {
-        ESP_LOGI(TAG, "combo keys: %s", Describe(combo_mask).c_str());
-        if (on_combo_) {
-            on_combo_(combo_mask);
-        }
+    if (key_id < 0 || key_id >= 31) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint32_t bit = 1u << key_id;
+    if (pressed_mask_ & bit) return;
+    const bool was_pair = (pressed_mask_ & kModeKeys) == kModeKeys;
+    pressed_mask_ |= bit;
+    if (!was_pair && (pressed_mask_ & kModeKeys) == kModeKeys && !fired_) {
+        chord_ = true;
+        deadline_us_ = esp_timer_get_time() + kHoldUs;
     }
 }
 
 void ComboKeyDetector::PressUp(int key_id) {
-    if (key_id < 0 || key_id >= 31) {
-        return;
-    }
+    if (key_id < 0 || key_id >= 31) return;
     std::lock_guard<std::mutex> lock(mutex_);
     pressed_mask_ &= ~(1u << key_id);
-    if ((pressed_mask_ & ~kComboLatchBit) == 0) {
-        pressed_mask_ = 0;  // 全部松开，解除组合键标记
-        last_key_ = -1;
-        last_press_us_ = 0;
+    if ((pressed_mask_ & kModeKeys) != kModeKeys) deadline_us_ = 0;
+    if ((pressed_mask_ & kModeKeys) == 0) {
+        chord_ = false;
+        fired_ = false;
     }
+}
+
+void ComboKeyDetector::Poll() {
+    std::function<void(uint32_t)> callback;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!deadline_us_ || fired_ || esp_timer_get_time() < deadline_us_) return;
+        fired_ = true;
+        deadline_us_ = 0;
+        callback = on_combo_;
+    }
+    if (callback) callback(kModeKeys);
 }
 
 void ComboKeyDetector::Reset() {
     std::lock_guard<std::mutex> lock(mutex_);
     pressed_mask_ = 0;
-    last_key_ = -1;
-    last_press_us_ = 0;
+    deadline_us_ = 0;
+    chord_ = fired_ = false;
 }
 
 bool ComboKeyDetector::IsComboActive() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return (pressed_mask_ & kComboLatchBit) != 0;
+    return chord_;
 }

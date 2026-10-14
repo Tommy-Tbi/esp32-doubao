@@ -9,6 +9,7 @@
 #include "otg_mode.h"
 
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <esp_lcd_panel_vendor.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
@@ -30,7 +31,7 @@ public:
                         gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
                         gpio_num_t pa_pin, uint8_t es8311_addr, bool use_mclk = true)
         : Es8311AudioCodec(i2c_master_handle, i2c_port, input_sample_rate, output_sample_rate,
-                             mclk,  bclk,  ws,  dout,  din,pa_pin,  es8311_addr,  use_mclk = true) {}
+                             mclk,  bclk,  ws,  dout,  din,pa_pin,  es8311_addr,  use_mclk) {}
 
     void EnableOutput(bool enable) override {
         if (enable == output_enabled_) {
@@ -49,7 +50,8 @@ private:
     i2c_master_bus_handle_t i2c_bus_;
     Button boot_button_;
     TouchButton* touch_buttons_[TOUCH_BUTTON_NUM] = {nullptr, nullptr, nullptr};
-    ComboKeyDetector combo_keys_;  // 同时按两个按键的组合键检测
+    ComboKeyDetector combo_keys_;
+    esp_timer_handle_t combo_timer_ = nullptr;
     Display* display_;
     Esp32Camera* camera_;
     light_mode_t light_mode_ = LIGHT_MODE_ALWAYS_ON;
@@ -124,7 +126,13 @@ private:
         // ------------------------------------------------------------------
         // 组合键：USB 音频与原生 USB Serial/JTAG 双向热切换
         // ------------------------------------------------------------------
-        combo_keys_.SetWindowMs(500);  // 放宽到 500ms
+        const esp_timer_create_args_t timer_args = {
+            .callback = [](void* arg) { static_cast<EspSparkBot*>(arg)->combo_keys_.Poll(); },
+            .arg = this,
+            .name = "combo_hold",
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &combo_timer_));
+        ESP_ERROR_CHECK(esp_timer_start_periodic(combo_timer_, 20000));
         combo_keys_.OnCombo([this](uint32_t mask) {
             ESP_LOGI(TAG, "combo %s pressed", ComboKeyDetector::Describe(mask).c_str());
             OtgMode::GetInstance().ToggleByKeys(mask);
@@ -153,7 +161,7 @@ private:
 
         // ------------------------------------------------------------------
         // 触摸键（本设备 2 个）：触摸键 1 对话，触摸键 2 音量减
-        // 两个触摸键同时按下（组合键）=> 双向热切换 USB 模式
+        // 左右音量触摸键（PAD2/PAD3）同时持续按住 5 秒 => 切换 USB 模式
         // ------------------------------------------------------------------
         // Touch button 1: 开始/停止对话
         touch_buttons_[0]->OnPress([this]() {

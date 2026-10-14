@@ -3,6 +3,7 @@
 
 #include <esp_log.h>
 #include <cstring>
+#include <algorithm>
 #include <driver/i2s_common.h>
 
 #define TAG "AudioCodec"
@@ -18,20 +19,18 @@ void AudioCodec::OutputData(std::vector<int16_t>& data) {
 }
 
 bool AudioCodec::InputData(std::vector<int16_t>& data) {
-    int samples = Read(data.data(), data.size());
-    if (samples > 0) {
-        return true;
-    }
-    return false;
+    const int samples = Read(data.data(), data.size());
+    const size_t valid = samples > 0 ? std::min(static_cast<size_t>(samples), data.size()) : 0;
+    // Short reads must not resend PCM left in the previous capture block.
+    std::fill(data.begin() + valid, data.end(), 0);
+    return valid > 0;
 }
 
 void AudioCodec::Start() {
     Settings settings("audio", false);
     output_volume_ = settings.GetInt("output_volume", output_volume_);
-    if (output_volume_ <= 0) {
-        ESP_LOGW(TAG, "Output volume value (%d) is too small, setting to default (10)", output_volume_);
-        output_volume_ = 10;
-    }
+    // Zero is a valid saved mute setting; reject only out-of-range values.
+    output_volume_ = std::clamp(output_volume_, 0, 100);
 
     if (tx_handle_ != nullptr) {
         ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
