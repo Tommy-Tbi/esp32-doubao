@@ -13,6 +13,7 @@ public:
     bool Initialize(AudioCodec* codec);
     bool Start();
     int PlaybackLevel() const { return playback_level_.load(); }
+    int MicrophoneLevel() const { return microphone_level_.load(); }
 
 private:
     static constexpr size_t kBlockSamples = 480;  // 10 ms @ 48 kHz
@@ -20,6 +21,8 @@ private:
     bool started_ = false;
     bool failed_ = false;
     AudioLevel level_meter_;
+    AudioLevel microphone_meter_;
+    std::atomic<int> microphone_level_{0};
     std::atomic<int> playback_level_{0};
     void CaptureTask();
     void PlaybackTask();

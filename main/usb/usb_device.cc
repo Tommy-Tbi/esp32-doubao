@@ -122,6 +122,15 @@ public:
         lv_obj_set_style_text_font(screen, font_body_, 0);
         lv_obj_set_style_text_color(screen, lv_color_hex(kText), 0);
         lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+        // A single hideable local view: never leave labels/icons rendering
+        // beneath the desktop canvas when its dirty regions are refreshed.
+        local_root_ = lv_obj_create(screen);
+        lv_obj_remove_style_all(local_root_);
+        lv_obj_set_size(local_root_, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        lv_obj_set_style_bg_opa(local_root_, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(local_root_, lv_color_hex(kBackground), 0);
+        lv_obj_remove_flag(local_root_, LV_OBJ_FLAG_SCROLLABLE);
+        screen = local_root_;
         auto label = [this, screen](lv_align_t align, int y) {
             auto* result = lv_label_create(screen);
             lv_obj_set_width(result, LV_PCT(90));
@@ -159,14 +168,18 @@ public:
         screen_pixels_ = static_cast<uint8_t*>(heap_caps_calloc(
             240 * 240, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         ESP_ERROR_CHECK(screen_pixels_ ? ESP_OK : ESP_ERR_NO_MEM);
-        screen_canvas_ = lv_canvas_create(screen);
+        screen_canvas_ = lv_canvas_create(lv_display_get_screen_active(lcd));
+        lv_obj_remove_style_all(screen_canvas_);
         lv_canvas_set_buffer(screen_canvas_, screen_pixels_, 240, 240, LV_COLOR_FORMAT_RGB565);
         lv_obj_align(screen_canvas_, LV_ALIGN_TOP_LEFT, 0, 0);
         lv_obj_add_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
         ESP_ERROR_CHECK(UsbScreen::Initialize() ? ESP_OK : ESP_ERR_NO_MEM);
-        // Top layer remains visible above both the local UI and USB canvas.
+        // Full-screen, square and opaque: the settings page must not expose
+        // an old volume icon (or desktop) around rounded card edges.
         brightness_panel_ = lv_obj_create(lv_layer_top());
-        lv_obj_set_size(brightness_panel_, 216, 150);
+        lv_obj_remove_style_all(brightness_panel_);
+        lv_obj_set_style_pad_all(brightness_panel_, 20, 0);
+        lv_obj_set_size(brightness_panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT);
         lv_obj_center(brightness_panel_);
         lv_obj_remove_flag(brightness_panel_, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_bg_color(brightness_panel_, lv_color_hex(kSurface), 0);
@@ -175,13 +188,13 @@ public:
         lv_obj_set_style_text_color(brightness_panel_, lv_color_hex(kText), 0);
         lv_obj_set_style_text_font(brightness_panel_, font_body_, 0);
         brightness_title_ = lv_label_create(brightness_panel_);
-        lv_obj_align(brightness_title_, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_align(brightness_title_, LV_ALIGN_TOP_MID, 0, 16);
         brightness_value_ = lv_label_create(brightness_panel_);
         lv_obj_set_style_text_font(brightness_value_, font_large_, 0);
-        lv_obj_align(brightness_value_, LV_ALIGN_TOP_MID, 0, 23);
+        lv_obj_align(brightness_value_, LV_ALIGN_TOP_MID, 0, 62);
         brightness_bar_ = lv_bar_create(brightness_panel_);
         lv_obj_set_size(brightness_bar_, 170, 8);
-        lv_obj_align(brightness_bar_, LV_ALIGN_TOP_MID, 0, 70);
+        lv_obj_align(brightness_bar_, LV_ALIGN_TOP_MID, 0, 120);
         lv_bar_set_range(brightness_bar_, 0, 100);
         lv_obj_set_style_bg_color(brightness_bar_, lv_color_hex(kAccent), LV_PART_INDICATOR);
         auto* hint = lv_label_create(brightness_panel_);
@@ -192,6 +205,7 @@ public:
         brightness_timer_ = lv_timer_create([](lv_timer_t* timer) {
             auto* self = static_cast<UsbDisplay*>(lv_timer_get_user_data(timer));
             lv_obj_add_flag(self->brightness_panel_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_invalidate(lv_obj_get_screen(self->screen_canvas_));
             lv_timer_pause(timer);
         }, 1200, this);
         lv_timer_pause(brightness_timer_);
@@ -216,12 +230,10 @@ public:
         DisplayLockGuard lock(this);
         const bool connected = UsbAudio::GetInstance().IsConnected();
         if (audio_view_ && connected && UsbScreen::TakeFrame(screen_pixels_)) {
-            lv_obj_remove_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
+            SetDesktopVisible(true);
             lv_obj_invalidate(screen_canvas_);
         }
-        if (!audio_view_ || !connected) {
-            lv_obj_add_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
-        }
+        if (!audio_view_ || !connected) SetDesktopVisible(false);
     }
 
     void SetStatus(const char* text) override {
@@ -232,7 +244,7 @@ public:
             // One content tree: destroy the previous view, never cover it.
             lv_obj_clean(audio_panel_);
             body_ = volume_label_ = volume_bar_ = mute_slash_ = nullptr;
-            mic_label_ = mic_dot_ = mic_pill_ = nullptr;
+            mic_label_ = mic_dot_ = mic_pill_ = mic_level_bar_ = nullptr;
             for (auto& wave : waves_) wave = nullptr;
             displayed_volume_ = displayed_mic_ = -1;
             audio_view_ = audio;
@@ -250,7 +262,7 @@ public:
             }
         }
         if (!audio) {
-            lv_obj_add_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
+            SetDesktopVisible(false);
             const bool debug = std::strcmp(text, "USB Debug") == 0;
             const bool error = std::strcmp(text, "USB Error") == 0;
             lv_label_set_text(body_, debug ?
@@ -275,11 +287,14 @@ public:
         lv_timer_resume(notice_timer_);
     }
 
-    void UpdateAudioState(int volume, bool mic_in_use, bool mic_muted = false, int level = 0) {
+    void UpdateAudioState(int volume, bool mic_in_use, bool mic_muted = false,
+                          int level = 0, int mic_level = 0) {
         volume = std::clamp(volume, 0, 100);
         DisplayLockGuard lock(this);
         if (!audio_view_) return;
-        lv_bar_set_value(volume_bar_, level, LV_ANIM_OFF);
+        lv_bar_set_value(volume_bar_, std::clamp(level, 0, 100), LV_ANIM_OFF);
+        lv_bar_set_value(mic_level_bar_, mic_in_use && !mic_muted ?
+            std::clamp(mic_level, 0, 100) : 0, LV_ANIM_OFF);
         if (volume != displayed_volume_) {
             displayed_volume_ = volume;
             char text[16];
@@ -313,6 +328,22 @@ protected:
     void Unlock() override { lvgl_port_unlock(); }
 
 private:
+    // Called only with the LVGL lock held. Full invalidation clears previously
+    // drawn pixels even when the next desktop update is only a small rectangle.
+    void SetDesktopVisible(bool visible) {
+        if (desktop_visible_ == visible) return;
+        desktop_visible_ = visible;
+        if (visible) {
+            lv_obj_add_flag(local_root_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(local_root_, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_invalidate(lv_obj_get_screen(screen_canvas_));
+    }
+    bool desktop_visible_ = false;
+    lv_obj_t* local_root_ = nullptr;
     lv_obj_t* brightness_panel_ = nullptr;
     lv_obj_t* brightness_title_ = nullptr;
     lv_obj_t* brightness_value_ = nullptr;
@@ -409,7 +440,7 @@ private:
         mic_pill_ = lv_obj_create(audio_panel_);
         lv_obj_remove_style_all(mic_pill_);
         lv_obj_set_style_bg_opa(mic_pill_, LV_OPA_COVER, 0);
-        lv_obj_set_size(mic_pill_, 180, 30);
+        lv_obj_set_size(mic_pill_, 180, 34);
         lv_obj_align(mic_pill_, LV_ALIGN_TOP_MID, 0, 120);
         lv_obj_remove_flag(mic_pill_, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(mic_pill_, LV_OBJ_FLAG_CLICKABLE);
@@ -421,7 +452,17 @@ private:
         lv_obj_set_style_text_font(mic_label_, font_small_, 0);
         lv_obj_set_style_text_color(mic_label_, lv_color_hex(kMuted), 0);
         lv_label_set_text(mic_label_, kMicIdle);
-        lv_obj_align(mic_label_, LV_ALIGN_CENTER, 8, 0);
+        lv_obj_align(mic_label_, LV_ALIGN_TOP_MID, 8, 1);
+        mic_level_bar_ = lv_bar_create(mic_pill_);
+        lv_obj_set_size(mic_level_bar_, 148, 4);
+        lv_obj_align(mic_level_bar_, LV_ALIGN_BOTTOM_MID, 0, -4);
+        lv_bar_set_range(mic_level_bar_, 0, 100);
+        lv_obj_set_style_bg_opa(mic_level_bar_, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(mic_level_bar_, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(mic_level_bar_, lv_color_hex(kBorder), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(mic_level_bar_, lv_color_hex(kSuccess), LV_PART_INDICATOR);
+        lv_obj_set_style_radius(mic_level_bar_, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_radius(mic_level_bar_, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
         mic_dot_ = lv_obj_create(mic_pill_);
         lv_obj_remove_style_all(mic_dot_);
         lv_obj_set_style_bg_opa(mic_dot_, LV_OPA_COVER, 0);
@@ -432,7 +473,7 @@ private:
         lv_obj_remove_flag(mic_dot_, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(mic_dot_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_bg_color(mic_dot_, lv_color_hex(0x475569), 0);
-        lv_obj_align(mic_dot_, LV_ALIGN_LEFT_MID, 18, 0);
+        lv_obj_align(mic_dot_, LV_ALIGN_LEFT_MID, 18, -6);
     }
 
     bool audio_view_ = true;  // Protected by the LVGL display lock.
@@ -444,6 +485,7 @@ private:
     lv_obj_t* mic_pill_ = nullptr;
     lv_obj_t* mic_label_ = nullptr;
     lv_obj_t* mic_dot_ = nullptr;
+    lv_obj_t* mic_level_bar_ = nullptr;
     int displayed_volume_ = -1;
     int displayed_mic_ = -1;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
@@ -500,7 +542,7 @@ public:
             volume = codec_->output_volume();
         }
         display_.UpdateAudioState(volume, UsbAudio::GetInstance().IsMicrophoneActive(),
-            UsbAudio::GetInstance().IsMicrophoneMuted(), bridge_.PlaybackLevel());
+            UsbAudio::GetInstance().IsMicrophoneMuted(), bridge_.PlaybackLevel(), bridge_.MicrophoneLevel());
     }
 
 private:

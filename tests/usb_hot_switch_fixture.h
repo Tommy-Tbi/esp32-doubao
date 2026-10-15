@@ -89,6 +89,7 @@ struct Display {
 struct AudioCodec {
     int input_rate = 48000, output_rate = 48000, channels = 1;
     int starts = 0, reads = 0, writes = 0;
+    int input_multiplier = 1;
     bool fail_read = false;
     std::function<void()> on_read;
     std::vector<int16_t> output;
@@ -101,7 +102,7 @@ struct AudioCodec {
         ++reads;
         if (on_read) on_read();
         if (fail_read) return false;
-        for (size_t i = 0; i < pcm.size(); ++i) pcm[i] = int16_t(1000 + i);
+        for (size_t i = 0; i < pcm.size(); ++i) pcm[i] = int16_t((1000 + i) * input_multiplier);
         return true;
     }
     void OutputData(std::vector<int16_t>& pcm) { ++writes; output = pcm; }
@@ -113,7 +114,7 @@ struct UsbAudio {
         bool speaker_enabled, mic_enabled;
     };
     bool initialized = false, connected = false;
-    bool mic_active = false, fail_send = false;
+    bool mic_active = false, fail_send = false, mic_muted = false;
     int mic_writes = 0;
     std::vector<int16_t> mic_pcm, speaker_pcm;
     std::function<void()> on_fetch;
@@ -124,6 +125,7 @@ struct UsbAudio {
     }
     bool IsMicrophoneActive() const { return mic_active && initialized && connected; }
     bool TryBeginModeSwitch() { return !IsMicrophoneActive(); }
+    bool IsMicrophoneMuted() const { return mic_muted; }
     bool SendMicrophoneData(const int16_t* p, size_t n) {
         assert(IsMicrophoneActive());
         if (fail_send) return false;

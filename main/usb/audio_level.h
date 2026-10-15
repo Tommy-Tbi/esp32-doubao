@@ -8,6 +8,7 @@
 // 300 ms release at the bridge's 10 ms block cadence. Not a calibrated SPL meter.
 class AudioLevel {
 public:
+    void Reset() { envelope_ = 0; }
     int Update(const int16_t* pcm, size_t count) {
         int peak = 0;
         for (size_t i = 0; i < count; ++i)

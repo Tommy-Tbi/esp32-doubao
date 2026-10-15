@@ -67,14 +67,25 @@ bool UsbAudioBridge::CaptureBlock(std::vector<int16_t>& pcm) {
     const bool recording = usb.IsMicrophoneActive();
     // Always drain I2S, even in native JTAG mode or while the host isn't
     // recording. This prevents old DMA samples leaking into a new recording.
+    auto clear_meter = [this]() {
+        microphone_meter_.Reset();
+        microphone_level_ = 0;
+    };
     if (!codec_->InputData(pcm)) {
         std::fill(pcm.begin(), pcm.end(), 0);
+        clear_meter();
         return false;
     }
-    if (!recording || !usb.IsMicrophoneActive()) return true;
-    // SendMicrophoneData rechecks state under its I/O mutex, so uninstall can
-    // never free the ring buffer while this task writes to it.
-    return usb.SendMicrophoneData(pcm.data(), pcm.size());
+    if (!recording || !usb.IsMicrophoneActive()) {
+        clear_meter();
+        return true;
+    }
+    // Meter the same successful capture blocks that are queued for USB, not
+    // speaker PCM. Muting still drains capture and sends silence in FeedMicrophone.
+    const bool sent = usb.SendMicrophoneData(pcm.data(), pcm.size());
+    if (!sent || usb.IsMicrophoneMuted() || !usb.IsMicrophoneActive()) clear_meter();
+    else microphone_level_ = microphone_meter_.Update(pcm.data(), pcm.size());
+    return sent;
 }
 
 void UsbAudioBridge::PlaybackBlock(std::vector<int16_t>& pcm) {

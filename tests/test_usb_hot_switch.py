@@ -49,7 +49,7 @@ int main() {
         owner.clear();
         boot_native = notifications = phy_installs = 0;
         fail_install = fail_release = fail_save = false;
-        usb.initialized = usb.connected = usb.mic_active = false;
+        usb.initialized = usb.connected = usb.mic_active = usb.mic_muted = false;
         usb.fail_resume = usb.fail_uninstall = false;
         mode.native_ = mode.switching_ = false;
         mode.faulted_ = false;
@@ -177,8 +177,10 @@ int main() {
     usb.mic_active = true;
     assert(bridge.CaptureBlock(pcm) && usb.mic_writes == 1);
     assert(usb.mic_pcm == pcm && usb.mic_pcm[0] == 1000 && usb.mic_pcm[479] == 1479);
+    assert(bridge.MicrophoneLevel() > 50 && bridge.MicrophoneLevel() < 60);
     codec.on_read = [&] { usb.mic_active = false; };
     assert(bridge.CaptureBlock(pcm) && usb.mic_writes == 1);  // stop mid-read
+    assert(bridge.MicrophoneLevel() == 0);
     codec.on_read = {};
     usb.connected = false;
     assert(bridge.CaptureBlock(pcm) && codec.reads == 4 && usb.mic_writes == 1);
@@ -187,10 +189,26 @@ int main() {
     codec.fail_read = true;
     assert(!bridge.CaptureBlock(pcm) && usb.mic_writes == 2);  // don't send stale data
     assert(pcm == std::vector<int16_t>(480, 0));
+    assert(bridge.MicrophoneLevel() == 0);
     codec.fail_read = false;
     usb.fail_send = true;
     assert(!bridge.CaptureBlock(pcm));  // ring backpressure is reported
     usb.fail_send = false;
+    assert(bridge.MicrophoneLevel() == 0);
+    assert(bridge.CaptureBlock(pcm));
+    int quiet_level = bridge.MicrophoneLevel();
+    codec.input_multiplier = 10;
+    assert(bridge.CaptureBlock(pcm) && bridge.MicrophoneLevel() > quiet_level);
+    usb.mic_muted = true;
+    const int before_mute = usb.mic_writes;
+    assert(bridge.CaptureBlock(pcm) && bridge.MicrophoneLevel() == 0);
+    assert(usb.mic_writes == before_mute + 1); // keep draining/streaming while muted
+    usb.mic_muted = false;
+    assert(bridge.CaptureBlock(pcm) && bridge.MicrophoneLevel() > 0);
+    codec.input_multiplier = 0;
+    for (int i = 0; i < 35; ++i) assert(bridge.CaptureBlock(pcm));
+    assert(bridge.MicrophoneLevel() == 0);
+    codec.input_multiplier = 1;
     AudioCodec bad_codec;
     bad_codec.input_rate = 16000;
     UsbAudioBridge invalid_bridge;
@@ -262,6 +280,11 @@ def main():
     for obj in ("screen", "audio_panel_", "mic_pill_", "mic_dot_"):
         assert f"lv_obj_set_style_bg_opa({obj}, LV_OPA_COVER, 0);" in ui_source
     assert "lv_obj_invalidate(lv_obj_get_screen(audio_panel_));" in ui_source
+    assert "lv_obj_add_flag(local_root_, LV_OBJ_FLAG_HIDDEN);" in ui_source
+    assert "lv_obj_remove_style_all(brightness_panel_);" in ui_source
+    assert "lv_obj_set_size(brightness_panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT);" in ui_source
+    assert "lv_obj_set_style_bg_opa(brightness_panel_, LV_OPA_COVER, 0);" in ui_source
+    assert "bridge_.MicrophoneLevel()" in ui_source
     assert "lv_obj_set_style_text_font(body_, font_body_, 0);" in ui_source
     out = ROOT / ".tmp" / "usb_hot_switch_test"
     out.mkdir(parents=True, exist_ok=True)
