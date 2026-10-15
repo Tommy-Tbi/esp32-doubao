@@ -1,4 +1,5 @@
 #include "usb_audio.h"
+#include "usb/usb_screen.h"
 
 #include <string.h>
 #include <esp_log.h>
@@ -27,14 +28,14 @@
 #define UAC_EP_SIZE 98
 #define AUDIO_FUNC_SPEAKER 0
 #define AUDIO_FUNC_MIC 1
-#define ITF_SPK_AC 0
-#define ITF_SPK_AS 1
-#define ITF_MIC_AC 2
-#define ITF_MIC_AS 3
+#define ITF_SPK_AC 1
+#define ITF_SPK_AS 2
+#define ITF_MIC_AC 3
+#define ITF_MIC_AS 4
 #define EPNUM_SPK_OUT 0x01
 #define EPNUM_SPK_FB_IN 0x81
 #define EPNUM_MIC_IN 0x82
-#define ITF_MEDIA 4
+#define ITF_MEDIA 5
 #define EPNUM_MEDIA_IN 0x83
 
 static const uint8_t kMediaReportDesc[] = { TUD_HID_REPORT_DESC_CONSUMER() };
@@ -43,6 +44,10 @@ static const uint8_t kMediaDesc[] = {
         sizeof(kMediaReportDesc), EPNUM_MEDIA_IN, 2, 10),
 };
 static_assert(CFG_TUD_HID == 1);
+static_assert(CFG_TUD_VENDOR == 1);
+static const uint8_t kScreenDesc[] = {
+    TUD_VENDOR_DESCRIPTOR(0, 7, 0x04, 0x84, 64),
+};
 
 // Deliberately no Feature Unit: volume is controlled locally. Do not advertise
 // mute/volume/connector controls unless their class requests are implemented.
@@ -81,9 +86,9 @@ static_assert(sizeof(kSpeakerDesc) == CFG_TUD_AUDIO_FUNC_1_DESC_LEN);
 static_assert(sizeof(kMicDesc) == CFG_TUD_AUDIO_FUNC_2_DESC_LEN);
 static_assert(CFG_TUD_AUDIO == 2);
 static constexpr size_t kConfigLen = TUD_CONFIG_DESC_LEN + sizeof(kSpeakerDesc) +
-    sizeof(kMicDesc) + sizeof(kMediaDesc);
+    sizeof(kMicDesc) + sizeof(kMediaDesc) + sizeof(kScreenDesc);
 static uint8_t kDescConfig[kConfigLen] = {
-    TUD_CONFIG_DESCRIPTOR(1, 5, 0, kConfigLen, 0, 250),
+    TUD_CONFIG_DESCRIPTOR(1, 6, 0, kConfigLen, 0, 250),
 };
 static const tusb_desc_device_t kDescDevice = {
     .bLength = sizeof(tusb_desc_device_t),
@@ -94,8 +99,8 @@ static const tusb_desc_device_t kDescDevice = {
     .bDeviceProtocol = MISC_PROTOCOL_IAD,
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = 0x303A,
-    .idProduct = 0x4011,
-    .bcdDevice = 0x0103,
+    .idProduct = 0x2986,
+    .bcdDevice = 0x0104,
     .iManufacturer = 1,
     .iProduct = 2,
     .iSerialNumber = 3,
@@ -103,8 +108,8 @@ static const tusb_desc_device_t kDescDevice = {
 };
 static const char kLanguage[] = {0x09, 0x04};
 static const char* kStrings[] = {
-    kLanguage, "ESP32-S3", "ESP32-S3 USB Speaker+Mic", "0001", "ESP32S3 Speaker",
-    "Media Control", "ESP32S3 MIC",
+    kLanguage, "ESP32-S3", "S3_R240x240_Ergb16_Fps5_Bl113", "0001", "ESP32S3 Speaker",
+    "Media Control", "ESP32S3 MIC", "S3_R240x240_Ergb16_Fps5_Bl113",
 };
 
 extern "C" {
@@ -195,10 +200,14 @@ bool UsbAudio::Initialize(const Config& config, bool enable) {
         mic_ringbuf_ = xRingbufferCreate(UAC_SAMPLE_RATE * sizeof(int16_t) / 5, RINGBUF_TYPE_BYTEBUF);
         if (!mic_ringbuf_) return false;
     }
-    memcpy(kDescConfig + TUD_CONFIG_DESC_LEN, kSpeakerDesc, sizeof(kSpeakerDesc));
-    memcpy(kDescConfig + TUD_CONFIG_DESC_LEN + sizeof(kSpeakerDesc), kMicDesc, sizeof(kMicDesc));
-    memcpy(kDescConfig + TUD_CONFIG_DESC_LEN + sizeof(kSpeakerDesc) + sizeof(kMicDesc),
-        kMediaDesc, sizeof(kMediaDesc));
+    size_t offset = TUD_CONFIG_DESC_LEN;
+    memcpy(kDescConfig + offset, kScreenDesc, sizeof(kScreenDesc));
+    offset += sizeof(kScreenDesc);
+    memcpy(kDescConfig + offset, kSpeakerDesc, sizeof(kSpeakerDesc));
+    offset += sizeof(kSpeakerDesc);
+    memcpy(kDescConfig + offset, kMicDesc, sizeof(kMicDesc));
+    offset += sizeof(kMicDesc);
+    memcpy(kDescConfig + offset, kMediaDesc, sizeof(kMediaDesc));
     media_.Reset();
     const tinyusb_config_t tusb_config = {
         .device_descriptor = &kDescDevice,
@@ -288,6 +297,7 @@ bool UsbAudio::Uninstall() {
     tud_disconnect();
     vTaskDelay(pdMS_TO_TICKS(250));  // Host must observe a real detach.
     StopUsbTask();
+    UsbScreen::Reset();
     media_.Reset();
     connected_ = false;
     mic_streaming_ = false;
@@ -367,6 +377,7 @@ void UsbAudio::OnMounted() {
     NotifyConnection(true);
 }
 void UsbAudio::OnUnmounted() {
+    UsbScreen::Reset();
     if (!initialized_) return;
     media_.Reset();
     connected_ = false;

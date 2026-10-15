@@ -1,4 +1,6 @@
 #include "usb_device.h"
+#include "usb_screen.h"
+#include <esp_heap_caps.h>
 #include "usb_audio_bridge.h"
 #include "usb_audio.h"
 #include "codecs/es8311_audio_codec.h"
@@ -147,6 +149,26 @@ public:
             lv_timer_pause(timer);
         }, 3500, this);
         lv_timer_pause(notice_timer_);
+        screen_pixels_ = static_cast<uint8_t*>(heap_caps_calloc(
+            240 * 240, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        ESP_ERROR_CHECK(screen_pixels_ ? ESP_OK : ESP_ERR_NO_MEM);
+        screen_canvas_ = lv_canvas_create(screen);
+        lv_canvas_set_buffer(screen_canvas_, screen_pixels_, 240, 240, LV_COLOR_FORMAT_RGB565);
+        lv_obj_align(screen_canvas_, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_add_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
+        ESP_ERROR_CHECK(UsbScreen::Initialize() ? ESP_OK : ESP_ERR_NO_MEM);
+    }
+
+    void UpdateUsbScreen() {
+        DisplayLockGuard lock(this);
+        const bool connected = UsbAudio::GetInstance().IsConnected();
+        if (audio_view_ && connected && UsbScreen::TakeFrame(screen_pixels_)) {
+            lv_obj_remove_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_invalidate(screen_canvas_);
+        }
+        if (!audio_view_ || !connected) {
+            lv_obj_add_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     void SetStatus(const char* text) override {
@@ -175,6 +197,7 @@ public:
             }
         }
         if (!audio) {
+            lv_obj_add_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
             const bool debug = std::strcmp(text, "USB 调试") == 0;
             const bool error = std::strcmp(text, "USB 异常") == 0;
             lv_label_set_text(body_, debug ?
@@ -236,6 +259,8 @@ protected:
     void Unlock() override { lvgl_port_unlock(); }
 
 private:
+    uint8_t* screen_pixels_ = nullptr;
+    lv_obj_t* screen_canvas_ = nullptr;
     void InitializeContentPanel(lv_obj_t* screen) {
         audio_panel_ = lv_obj_create(screen);
         lv_obj_remove_style_all(audio_panel_);
@@ -380,6 +405,7 @@ public:
 public:
     void PollKeys() {
         combo_.Poll();
+        display_.UpdateUsbScreen();
         const int64_t now = esp_timer_get_time();
         if (now - last_ui_update_us_ < 100000) return;
         last_ui_update_us_ = now;

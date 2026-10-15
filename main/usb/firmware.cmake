@@ -13,6 +13,7 @@ idf_component_register(
     SRCS
         "${FIRMWARE_ROOT}/main.cc"
         "${FIRMWARE_USB_DIR}/usb_device.cc"
+        "${FIRMWARE_USB_DIR}/usb_screen.cc"
         "${FIRMWARE_USB_DIR}/usb_audio_bridge.cc"
         "${FIRMWARE_ROOT}/usb_audio.cc"
         "${FIRMWARE_ROOT}/audio/audio_codec.cc"
