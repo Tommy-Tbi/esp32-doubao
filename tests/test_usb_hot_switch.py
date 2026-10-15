@@ -20,8 +20,13 @@ TEST = r'''
 #undef TAG
 #include "usb/usb_audio_bridge.cc"
 #undef private
+#include "usb/speaker_ui.h"
 
 int main() {
+    static_assert(SpeakerWaveCount(0) == 0);
+    static_assert(SpeakerWaveCount(1) == 1 && SpeakerWaveCount(33) == 1);
+    static_assert(SpeakerWaveCount(34) == 2 && SpeakerWaveCount(66) == 2);
+    static_assert(SpeakerWaveCount(67) == 3 && SpeakerWaveCount(100) == 3);
     // Real level-meter implementation: silence, full-scale negative sample,
     // -20 dBFS mapping, monotonic release, and eventual zero.
     AudioLevel meter;
@@ -290,6 +295,11 @@ def main():
     assert 'card(0, "Speaker")' in ui_source
     assert 'card(86, "Microphone")' in ui_source
     assert "volume_label_" not in ui_source
+    assert "display_.ShowVolume(volume);" in ui_source
+    assert "SpeakerWaveCount(volume)" in ui_source
+    assert ui_source.index("ClearPanelMemory();") < ui_source.index("lvgl_port_init(&port)")
+    assert "xSemaphoreTake(done, pdMS_TO_TICKS(1000))" in ui_source
+    assert "heap_caps_free(black);" in ui_source
     assert "mic_in_use && !mic_muted ?" not in ui_source
     assert "lv_obj_set_style_text_font(body_, font_body_, 0);" in ui_source
     out = ROOT / ".tmp" / "usb_hot_switch_test"

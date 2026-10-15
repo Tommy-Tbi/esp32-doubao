@@ -1,5 +1,6 @@
 #include "usb_device.h"
 #include "brightness_keys.h"
+#include "speaker_ui.h"
 #include "usb_backlight.h"
 #include "usb_screen.h"
 #include <esp_heap_caps.h>
@@ -26,6 +27,7 @@
 #include <driver/spi_common.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 
 #include "usb_font_data.h"
 #if !LV_USE_TINY_TTF
@@ -76,8 +78,12 @@ public:
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_));
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_, true));
+        ClearPanelMemory();
         const esp_err_t display_on = esp_lcd_panel_disp_on_off(panel_, true);
         if (display_on != ESP_ERR_NOT_SUPPORTED) ESP_ERROR_CHECK(display_on);
+        // Brief pure-black phase helps distinguish retained LCD pixels from
+        // physical image persistence. No LVGL objects exist at this point.
+        vTaskDelay(pdMS_TO_TICKS(250));
         // GPIO46 is owned by UsbBacklight, including while audio is active.
 
         lv_init();
@@ -206,11 +212,30 @@ public:
             lv_timer_pause(timer);
         }, 1200, this);
         lv_timer_pause(brightness_timer_);
+        InitializeVolumePopup();
+        // Explicit initial full repaint after the complete object tree exists.
+        lv_obj_invalidate(lv_display_get_screen_active(lcd));
+    }
+
+    void ShowVolume(int volume) {
+        DisplayLockGuard lock(this);
+        volume = std::clamp(volume, 0, 100);
+        char text[16];
+        snprintf(text, sizeof(text), "%d%%", volume);
+        lv_label_set_text(volume_popup_value_, text);
+        lv_label_set_text(volume_popup_title_, volume == 0 ? "Speaker muted" : "Speaker volume");
+        lv_bar_set_value(volume_popup_bar_, volume, LV_ANIM_OFF);
+        lv_obj_remove_flag(volume_popup_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(volume_popup_);
+        lv_timer_reset(volume_popup_timer_);
+        lv_timer_resume(volume_popup_timer_);
     }
 
     void ShowBrightness(int value, bool editing, bool saved = true) {
         DisplayLockGuard lock(this);
         lv_timer_pause(brightness_timer_);
+        lv_obj_add_flag(volume_popup_, LV_OBJ_FLAG_HIDDEN);
+        lv_timer_pause(volume_popup_timer_);
         lv_label_set_text(brightness_title_, editing ? "Brightness" : saved ? "Brightness saved" : "Save failed");
         char text[16];
         snprintf(text, sizeof(text), "%d%%", value);
@@ -242,6 +267,7 @@ public:
             lv_obj_clean(audio_panel_);
             body_ = speaker_status_ = volume_bar_ = nullptr;
             mic_label_ = mic_level_bar_ = nullptr;
+            for (auto& wave : speaker_waves_) wave = nullptr;
             displayed_volume_ = displayed_mic_ = -1;
             audio_view_ = audio;
             if (audio) {
@@ -258,6 +284,8 @@ public:
             }
         }
         if (!audio) {
+            lv_obj_add_flag(volume_popup_, LV_OBJ_FLAG_HIDDEN);
+            lv_timer_pause(volume_popup_timer_);
             SetDesktopVisible(false);
             const bool debug = std::strcmp(text, "USB Debug") == 0;
             const bool error = std::strcmp(text, "USB Error") == 0;
@@ -290,9 +318,15 @@ public:
         // Input remains live even when USB recording is idle or locally muted.
         lv_bar_set_value(volume_bar_, volume > 0 ? std::clamp(level, 0, 100) : 0, LV_ANIM_OFF);
         lv_bar_set_value(mic_level_bar_, std::clamp(mic_level, 0, 100), LV_ANIM_OFF);
+        volume = std::clamp(volume, 0, 100);
         const int speaker_state = volume > 0 ? 1 : 0;
-        if (displayed_volume_ != speaker_state) {
-            displayed_volume_ = speaker_state;
+        if (displayed_volume_ != volume) {
+            displayed_volume_ = volume;
+            const int waves = SpeakerWaveCount(volume);
+            for (int i = 0; i < 3; ++i) {
+                if (i < waves) lv_obj_remove_flag(speaker_waves_[i], LV_OBJ_FLAG_HIDDEN);
+                else lv_obj_add_flag(speaker_waves_[i], LV_OBJ_FLAG_HIDDEN);
+            }
             lv_label_set_text(speaker_status_, speaker_state ? "USB playback" : "Output muted");
             lv_obj_set_style_text_color(speaker_status_,
                 lv_color_hex(speaker_state ? kMuted : kWarning), 0);
@@ -312,6 +346,73 @@ protected:
     void Unlock() override { lvgl_port_unlock(); }
 
 private:
+    void ClearPanelMemory() {
+        // SPI DMA is asynchronous: wait for each stripe before reusing/freeing
+        // its buffer. This runs before esp_lvgl_port installs its own callback.
+        auto done = xSemaphoreCreateBinary();
+        ESP_ERROR_CHECK(done ? ESP_OK : ESP_ERR_NO_MEM);
+        auto* black = static_cast<uint16_t*>(heap_caps_calloc(
+            DISPLAY_WIDTH * 20, sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+        ESP_ERROR_CHECK(black ? ESP_OK : ESP_ERR_NO_MEM);
+        const esp_lcd_panel_io_callbacks_t callbacks = {
+            .on_color_trans_done = [](esp_lcd_panel_io_handle_t,
+                                     esp_lcd_panel_io_event_data_t*, void* ctx) -> bool {
+                BaseType_t wake = pdFALSE;
+                xSemaphoreGiveFromISR(static_cast<SemaphoreHandle_t>(ctx), &wake);
+                return wake == pdTRUE;
+            },
+        };
+        ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(panel_io_, &callbacks, done));
+        for (int y = 0; y < DISPLAY_HEIGHT; y += 20) {
+            ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_, 0, y, DISPLAY_WIDTH,
+                std::min(y + 20, DISPLAY_HEIGHT), black));
+            ESP_ERROR_CHECK(xSemaphoreTake(done, pdMS_TO_TICKS(1000)) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT);
+        }
+        const esp_lcd_panel_io_callbacks_t no_callbacks = {};
+        ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(panel_io_, &no_callbacks, nullptr));
+        heap_caps_free(black);
+        vSemaphoreDelete(done);
+    }
+
+    void InitializeVolumePopup() {
+        volume_popup_ = lv_obj_create(lv_layer_top());
+        lv_obj_remove_style_all(volume_popup_);
+        lv_obj_set_size(volume_popup_, 204, 116);
+        lv_obj_center(volume_popup_);
+        lv_obj_set_style_bg_opa(volume_popup_, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(volume_popup_, lv_color_hex(kSurface), 0);
+        lv_obj_set_style_radius(volume_popup_, 14, 0);
+        lv_obj_set_style_border_width(volume_popup_, 1, 0);
+        lv_obj_set_style_border_color(volume_popup_, lv_color_hex(kAccent), 0);
+        lv_obj_set_style_text_color(volume_popup_, lv_color_hex(kText), 0);
+        lv_obj_remove_flag(volume_popup_, LV_OBJ_FLAG_SCROLLABLE);
+        volume_popup_title_ = lv_label_create(volume_popup_);
+        lv_obj_set_style_text_font(volume_popup_title_, font_body_, 0);
+        lv_obj_align(volume_popup_title_, LV_ALIGN_TOP_MID, 0, 10);
+        volume_popup_value_ = lv_label_create(volume_popup_);
+        lv_obj_set_style_text_font(volume_popup_value_, font_large_, 0);
+        lv_obj_align(volume_popup_value_, LV_ALIGN_TOP_MID, 0, 37);
+        volume_popup_bar_ = lv_bar_create(volume_popup_);
+        lv_obj_set_size(volume_popup_bar_, 168, 8);
+        lv_obj_align(volume_popup_bar_, LV_ALIGN_BOTTOM_MID, 0, -14);
+        lv_bar_set_range(volume_popup_bar_, 0, 100);
+        lv_obj_set_style_bg_color(volume_popup_bar_, lv_color_hex(kAccent), LV_PART_INDICATOR);
+        lv_obj_add_flag(volume_popup_, LV_OBJ_FLAG_HIDDEN);
+        volume_popup_timer_ = lv_timer_create([](lv_timer_t* timer) {
+            auto* self = static_cast<UsbDisplay*>(lv_timer_get_user_data(timer));
+            lv_obj_add_flag(self->volume_popup_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_invalidate(lv_obj_get_screen(self->screen_canvas_));
+            lv_timer_pause(timer);
+        }, 1800, this);
+        lv_timer_pause(volume_popup_timer_);
+    }
+    lv_obj_t* volume_popup_ = nullptr;
+    lv_obj_t* volume_popup_title_ = nullptr;
+    lv_obj_t* volume_popup_value_ = nullptr;
+    lv_obj_t* volume_popup_bar_ = nullptr;
+    lv_timer_t* volume_popup_timer_ = nullptr;
+    lv_obj_t* speaker_waves_[3] = {};
+
     // Called only with the LVGL lock held. Full invalidation clears previously
     // drawn pixels even when the next desktop update is only a small rectangle.
     void SetDesktopVisible(bool visible) {
@@ -370,7 +471,7 @@ private:
             lv_obj_set_style_text_font(label, font_body_, 0);
             lv_obj_set_style_text_color(label, lv_color_hex(kText), 0);
             lv_label_set_text(label, title);
-            lv_obj_set_pos(label, 46, 8);
+            lv_obj_set_pos(label, 54, 8);
             return obj;
         };
         auto meter = [](lv_obj_t* parent, uint32_t color) {
@@ -416,13 +517,19 @@ private:
             lv_obj_set_style_arc_rounded(obj, true, LV_PART_INDICATOR);
             lv_obj_set_style_arc_color(obj, lv_color_hex(color), LV_PART_INDICATOR);
             lv_obj_set_style_arc_opa(obj, LV_OPA_COVER, LV_PART_INDICATOR);
+            return obj;
         };
         auto* speaker = card(0, "Speaker");
         static const lv_point_precise_t speaker_outline[] = {
             {15, 18}, {20, 18}, {27, 12}, {27, 32}, {20, 26}, {15, 26}, {15, 18}
         };
         line(speaker, speaker_outline, 7, kAccent);
-        arc(speaker, 21, 11, 22, 320, 40, kAccent);
+        for (int i = 0; i < 3; ++i) {
+            const int radius = 6 + i * 4;
+            speaker_waves_[i] = arc(speaker, 26 - radius, 22 - radius,
+                radius * 2, 320, 40, kAccent);
+            lv_obj_add_flag(speaker_waves_[i], LV_OBJ_FLAG_HIDDEN);
+        }
         volume_bar_ = meter(speaker, kAccent);
         speaker_status_ = status(speaker, "USB playback");
 
@@ -547,8 +654,7 @@ private:
             codec_->SetOutputVolume(std::clamp(codec_->output_volume() + delta, 0, 100));
             volume = codec_->output_volume();
         }
-        display_.ShowNotification(volume == 0 ? "Speaker muted" :
-            delta > 0 ? "Speaker volume up" : "Speaker volume down", 1500);
+        display_.ShowVolume(volume);
     }
 
     // Called with keys_mutex_: touch callbacks and polling share one state machine.
