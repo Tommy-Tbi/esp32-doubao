@@ -76,16 +76,11 @@ bool UsbAudioBridge::CaptureBlock(std::vector<int16_t>& pcm) {
         clear_meter();
         return false;
     }
-    if (!recording || !usb.IsMicrophoneActive()) {
-        clear_meter();
-        return true;
-    }
-    // Meter the same successful capture blocks that are queued for USB, not
-    // speaker PCM. Muting still drains capture and sends silence in FeedMicrophone.
-    const bool sent = usb.SendMicrophoneData(pcm.data(), pcm.size());
-    if (!sent || usb.IsMicrophoneMuted() || !usb.IsMicrophoneActive()) clear_meter();
-    else microphone_level_ = microphone_meter_.Update(pcm.data(), pcm.size());
-    return sent;
+    // Local input meter is intentionally BEFORE USB activity/mute/backpressure
+    // gating. Monitoring never opens a host recording stream or bypasses mute.
+    microphone_level_ = microphone_meter_.Update(pcm.data(), pcm.size());
+    if (!recording || !usb.IsMicrophoneActive()) return true;
+    return usb.SendMicrophoneData(pcm.data(), pcm.size());
 }
 
 void UsbAudioBridge::PlaybackBlock(std::vector<int16_t>& pcm) {

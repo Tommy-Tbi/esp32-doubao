@@ -174,16 +174,18 @@ int main() {
     usb.initialized = usb.connected = true;
     usb.mic_active = false;
     assert(bridge.CaptureBlock(pcm) && codec.reads == 1 && usb.mic_writes == 0);
+    assert(bridge.MicrophoneLevel() > 0); // local monitoring does not open USB recording
     usb.mic_active = true;
     assert(bridge.CaptureBlock(pcm) && usb.mic_writes == 1);
     assert(usb.mic_pcm == pcm && usb.mic_pcm[0] == 1000 && usb.mic_pcm[479] == 1479);
     assert(bridge.MicrophoneLevel() > 50 && bridge.MicrophoneLevel() < 60);
     codec.on_read = [&] { usb.mic_active = false; };
     assert(bridge.CaptureBlock(pcm) && usb.mic_writes == 1);  // stop mid-read
-    assert(bridge.MicrophoneLevel() == 0);
+    assert(bridge.MicrophoneLevel() > 0);
     codec.on_read = {};
     usb.connected = false;
     assert(bridge.CaptureBlock(pcm) && codec.reads == 4 && usb.mic_writes == 1);
+    assert(bridge.MicrophoneLevel() > 0); // unplugging USB must not freeze the meter
     usb.connected = usb.mic_active = true;
     assert(bridge.CaptureBlock(pcm) && usb.mic_writes == 2);  // hot return to audio
     codec.fail_read = true;
@@ -194,14 +196,14 @@ int main() {
     usb.fail_send = true;
     assert(!bridge.CaptureBlock(pcm));  // ring backpressure is reported
     usb.fail_send = false;
-    assert(bridge.MicrophoneLevel() == 0);
+    assert(bridge.MicrophoneLevel() > 0); // upload backpressure is not local silence
     assert(bridge.CaptureBlock(pcm));
     int quiet_level = bridge.MicrophoneLevel();
     codec.input_multiplier = 10;
     assert(bridge.CaptureBlock(pcm) && bridge.MicrophoneLevel() > quiet_level);
     usb.mic_muted = true;
     const int before_mute = usb.mic_writes;
-    assert(bridge.CaptureBlock(pcm) && bridge.MicrophoneLevel() == 0);
+    assert(bridge.CaptureBlock(pcm) && bridge.MicrophoneLevel() > 0);
     assert(usb.mic_writes == before_mute + 1); // keep draining/streaming while muted
     usb.mic_muted = false;
     assert(bridge.CaptureBlock(pcm) && bridge.MicrophoneLevel() > 0);
@@ -277,7 +279,7 @@ def main():
     assert "if (!audio_view_) return;" in ui_source
     # Theme-independent repaint contract: deleting widgets alone does not
     # guarantee that transparent RGB565 regions erase the old panel pixels.
-    for obj in ("screen", "audio_panel_", "mic_pill_", "mic_dot_"):
+    for obj in ("screen", "audio_panel_", "local_root_"):
         assert f"lv_obj_set_style_bg_opa({obj}, LV_OPA_COVER, 0);" in ui_source
     assert "lv_obj_invalidate(lv_obj_get_screen(audio_panel_));" in ui_source
     assert "lv_obj_add_flag(local_root_, LV_OBJ_FLAG_HIDDEN);" in ui_source
@@ -285,6 +287,10 @@ def main():
     assert "lv_obj_set_size(brightness_panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT);" in ui_source
     assert "lv_obj_set_style_bg_opa(brightness_panel_, LV_OPA_COVER, 0);" in ui_source
     assert "bridge_.MicrophoneLevel()" in ui_source
+    assert 'card(0, "Speaker")' in ui_source
+    assert 'card(86, "Microphone")' in ui_source
+    assert "volume_label_" not in ui_source
+    assert "mic_in_use && !mic_muted ?" not in ui_source
     assert "lv_obj_set_style_text_font(body_, font_body_, 0);" in ui_source
     out = ROOT / ".tmp" / "usb_hot_switch_test"
     out.mkdir(parents=True, exist_ok=True)

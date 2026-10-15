@@ -34,9 +34,6 @@
 constexpr const char* kKeyHint = "Top 2s: Light | +/- 3s: USB";
 
 namespace {
-constexpr const char* kVolumeFormat = "%d%%";
-constexpr const char* kMicInUse = "Mic in use";
-constexpr const char* kMicIdle = "Mic idle";
 // Shared palette keeps the small RGB565 screen calm and legible.
 constexpr uint32_t kBackground = 0x090F19;
 constexpr uint32_t kSurface = 0x131F2E;
@@ -243,9 +240,8 @@ public:
         if (audio != audio_view_) {
             // One content tree: destroy the previous view, never cover it.
             lv_obj_clean(audio_panel_);
-            body_ = volume_label_ = volume_bar_ = mute_slash_ = nullptr;
-            mic_label_ = mic_dot_ = mic_pill_ = mic_level_bar_ = nullptr;
-            for (auto& wave : waves_) wave = nullptr;
+            body_ = speaker_status_ = volume_bar_ = nullptr;
+            mic_label_ = mic_level_bar_ = nullptr;
             displayed_volume_ = displayed_mic_ = -1;
             audio_view_ = audio;
             if (audio) {
@@ -289,37 +285,25 @@ public:
 
     void UpdateAudioState(int volume, bool mic_in_use, bool mic_muted = false,
                           int level = 0, int mic_level = 0) {
-        volume = std::clamp(volume, 0, 100);
         DisplayLockGuard lock(this);
         if (!audio_view_) return;
-        lv_bar_set_value(volume_bar_, std::clamp(level, 0, 100), LV_ANIM_OFF);
-        lv_bar_set_value(mic_level_bar_, mic_in_use && !mic_muted ?
-            std::clamp(mic_level, 0, 100) : 0, LV_ANIM_OFF);
-        if (volume != displayed_volume_) {
-            displayed_volume_ = volume;
-            char text[16];
-            snprintf(text, sizeof(text), kVolumeFormat, volume);
-            lv_label_set_text(volume_label_, text);
-            lv_obj_set_style_text_color(volume_label_,
-                lv_color_hex(volume == 0 ? kMuted : kText), 0);
-            const int waves = volume == 0 ? 0 : volume <= 33 ? 1 : volume <= 66 ? 2 : 3;
-            for (int i = 0; i < 3; ++i) {
-                if (i < waves) lv_obj_remove_flag(waves_[i], LV_OBJ_FLAG_HIDDEN);
-                else lv_obj_add_flag(waves_[i], LV_OBJ_FLAG_HIDDEN);
-            }
-            if (volume == 0) lv_obj_remove_flag(mute_slash_, LV_OBJ_FLAG_HIDDEN);
-            else lv_obj_add_flag(mute_slash_, LV_OBJ_FLAG_HIDDEN);
+        // Input remains live even when USB recording is idle or locally muted.
+        lv_bar_set_value(volume_bar_, volume > 0 ? std::clamp(level, 0, 100) : 0, LV_ANIM_OFF);
+        lv_bar_set_value(mic_level_bar_, std::clamp(mic_level, 0, 100), LV_ANIM_OFF);
+        const int speaker_state = volume > 0 ? 1 : 0;
+        if (displayed_volume_ != speaker_state) {
+            displayed_volume_ = speaker_state;
+            lv_label_set_text(speaker_status_, speaker_state ? "USB playback" : "Output muted");
+            lv_obj_set_style_text_color(speaker_status_,
+                lv_color_hex(speaker_state ? kMuted : kWarning), 0);
         }
         const int mic_state = !mic_in_use ? 0 : mic_muted ? 2 : 1;
         if (displayed_mic_ != mic_state) {
             displayed_mic_ = mic_state;
-            lv_label_set_text(mic_label_, mic_state == 2 ? "Mic muted" : mic_in_use ? kMicInUse : kMicIdle);
+            lv_label_set_text(mic_label_, mic_state == 2 ? "Local input / USB muted" :
+                mic_in_use ? "Local input / USB live" : "Local input / USB idle");
             lv_obj_set_style_text_color(mic_label_,
                 lv_color_hex(mic_state == 2 ? kWarning : mic_in_use ? kSuccess : kMuted), 0);
-            lv_obj_set_style_bg_color(mic_dot_,
-                lv_color_hex(mic_state == 2 ? kWarning : mic_in_use ? kSuccess : 0x475569), 0);
-            lv_obj_set_style_bg_color(mic_pill_,
-                lv_color_hex(mic_in_use ? 0x173B35 : 0x1C2A3B), 0);
         }
     }
 
@@ -364,127 +348,107 @@ private:
         lv_obj_remove_flag(audio_panel_, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(audio_panel_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_pad_all(audio_panel_, 0, 0);
-        lv_obj_set_style_bg_color(audio_panel_, lv_color_hex(kSurface), 0);
-        lv_obj_set_style_border_width(audio_panel_, 1, 0);
-        lv_obj_set_style_border_color(audio_panel_, lv_color_hex(kBorder), 0);
-        lv_obj_set_style_radius(audio_panel_, 20, 0);
+        lv_obj_set_style_bg_color(audio_panel_, lv_color_hex(kBackground), 0);
     }
 
     void InitializeAudioPanel() {
-        auto* icon = lv_obj_create(audio_panel_);
-        lv_obj_set_size(icon, 76, 60);
-        lv_obj_align(icon, LV_ALIGN_TOP_LEFT, 12, 25);
-        lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_pad_all(icon, 0, 0);
-        lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(icon, 0, 0);
-        // Vector icon avoids relying on symbol glyphs in the bundled CJK font.
-        auto line = [icon](const lv_point_precise_t* points, uint32_t count, uint32_t color) {
-            auto* obj = lv_line_create(icon);
-            lv_line_set_points(obj, points, count);
-            lv_obj_set_style_line_width(obj, 3, 0);
-            lv_obj_set_style_line_rounded(obj, true, 0);
-            lv_obj_set_style_line_color(obj, lv_color_hex(color), 0);
+        // Two equal channels, with the same title, meter and status baselines.
+        // No legacy volume percentage, large speaker or nested mic pill.
+        auto card = [this](int y, const char* title) {
+            auto* obj = lv_obj_create(audio_panel_);
+            lv_obj_remove_style_all(obj);
+            lv_obj_set_size(obj, 216, 80);
+            lv_obj_set_pos(obj, 0, y);
+            lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(obj, lv_color_hex(kSurface), 0);
+            lv_obj_set_style_radius(obj, 14, 0);
+            lv_obj_set_style_border_width(obj, 1, 0);
+            lv_obj_set_style_border_color(obj, lv_color_hex(kBorder), 0);
+            lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+            auto* label = lv_label_create(obj);
+            lv_obj_set_style_text_font(label, font_body_, 0);
+            lv_obj_set_style_text_color(label, lv_color_hex(kText), 0);
+            lv_label_set_text(label, title);
+            lv_obj_set_pos(label, 46, 8);
             return obj;
         };
-        static const lv_point_precise_t speaker[] = {
-            {8, 22}, {20, 22}, {34, 10}, {34, 50}, {20, 38}, {8, 38}, {8, 22}
+        auto meter = [](lv_obj_t* parent, uint32_t color) {
+            auto* bar = lv_bar_create(parent);
+            lv_obj_remove_style_all(bar);
+            lv_obj_set_size(bar, 184, 8);
+            lv_obj_set_pos(bar, 16, 42);
+            lv_bar_set_range(bar, 0, 100);
+            lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
+            lv_obj_set_style_bg_color(bar, lv_color_hex(kBorder), LV_PART_MAIN);
+            lv_obj_set_style_bg_color(bar, lv_color_hex(color), LV_PART_INDICATOR);
+            lv_obj_set_style_radius(bar, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+            lv_obj_set_style_radius(bar, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+            return bar;
         };
-        static const lv_point_precise_t slash[] = {{6, 8}, {70, 52}};
-        line(speaker, 7, kAccent);
-        // True circular wavefronts, not three-point chevrons.
-        for (int i = 0; i < 3; ++i) {
-            const int radius = 14 + i * 9;
-            waves_[i] = lv_arc_create(icon);
-            lv_obj_remove_style_all(waves_[i]);
-            lv_obj_set_size(waves_[i], radius * 2, radius * 2);
-            lv_obj_set_pos(waves_[i], 36 - radius, 30 - radius);
-            lv_obj_remove_flag(waves_[i], LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_remove_flag(waves_[i], LV_OBJ_FLAG_SCROLLABLE);
-            lv_arc_set_bg_angles(waves_[i], 0, 0);
-            lv_arc_set_angles(waves_[i], 320, 40);
-            lv_obj_set_style_arc_width(waves_[i], 3, LV_PART_INDICATOR);
-            lv_obj_set_style_arc_rounded(waves_[i], true, LV_PART_INDICATOR);
-            lv_obj_set_style_arc_color(waves_[i], lv_color_hex(kAccent), LV_PART_INDICATOR);
-            lv_obj_set_style_arc_opa(waves_[i], LV_OPA_COVER, LV_PART_INDICATOR);
-        }
-        mute_slash_ = line(slash, 2, kWarning);
-        lv_obj_add_flag(mute_slash_, LV_OBJ_FLAG_HIDDEN);
+        auto status = [this](lv_obj_t* parent, const char* text) {
+            auto* label = lv_label_create(parent);
+            lv_obj_set_style_text_font(label, font_small_, 0);
+            lv_obj_set_style_text_color(label, lv_color_hex(kMuted), 0);
+            lv_label_set_text(label, text);
+            lv_obj_set_pos(label, 16, 56);
+            return label;
+        };
+        auto line = [](lv_obj_t* parent, const lv_point_precise_t* points,
+                       uint32_t count, uint32_t color) {
+            auto* obj = lv_line_create(parent);
+            lv_line_set_points(obj, points, count);
+            lv_obj_set_style_line_width(obj, 2, 0);
+            lv_obj_set_style_line_rounded(obj, true, 0);
+            lv_obj_set_style_line_color(obj, lv_color_hex(color), 0);
+        };
+        auto arc = [](lv_obj_t* parent, int x, int y, int size, int start,
+                      int end, uint32_t color) {
+            auto* obj = lv_arc_create(parent);
+            lv_obj_remove_style_all(obj);
+            lv_obj_set_size(obj, size, size);
+            lv_obj_set_pos(obj, x, y);
+            lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+            lv_arc_set_bg_angles(obj, 0, 0);
+            lv_arc_set_angles(obj, start, end);
+            lv_obj_set_style_arc_width(obj, 2, LV_PART_INDICATOR);
+            lv_obj_set_style_arc_rounded(obj, true, LV_PART_INDICATOR);
+            lv_obj_set_style_arc_color(obj, lv_color_hex(color), LV_PART_INDICATOR);
+            lv_obj_set_style_arc_opa(obj, LV_OPA_COVER, LV_PART_INDICATOR);
+        };
+        auto* speaker = card(0, "Speaker");
+        static const lv_point_precise_t speaker_outline[] = {
+            {15, 18}, {20, 18}, {27, 12}, {27, 32}, {20, 26}, {15, 26}, {15, 18}
+        };
+        line(speaker, speaker_outline, 7, kAccent);
+        arc(speaker, 21, 11, 22, 320, 40, kAccent);
+        volume_bar_ = meter(speaker, kAccent);
+        speaker_status_ = status(speaker, "USB playback");
 
-        auto* caption = lv_label_create(audio_panel_);
-        lv_obj_set_style_text_font(caption, font_small_, 0);
-        lv_obj_set_style_text_color(caption, lv_color_hex(kMuted), 0);
-        lv_label_set_text(caption, "VOLUME");
-        lv_obj_align(caption, LV_ALIGN_TOP_RIGHT, -16, 18);
-        volume_label_ = lv_label_create(audio_panel_);
-        lv_obj_set_style_text_font(volume_label_, font_large_, 0);
-        lv_label_set_text(volume_label_, "--%");
-        lv_obj_align(volume_label_, LV_ALIGN_TOP_RIGHT, -14, 40);
-        auto* level_caption = lv_label_create(audio_panel_);
-        lv_obj_set_style_text_font(level_caption, font_small_, 0);
-        lv_obj_set_style_text_color(level_caption, lv_color_hex(kMuted), 0);
-        lv_label_set_text(level_caption, "USB LEVEL");
-        lv_obj_align(level_caption, LV_ALIGN_TOP_MID, 0, 82);
-        volume_bar_ = lv_bar_create(audio_panel_);
-        lv_obj_set_size(volume_bar_, 180, 6);
-        lv_obj_align(volume_bar_, LV_ALIGN_TOP_MID, 0, 104);
-        lv_bar_set_range(volume_bar_, 0, 100);
-        lv_obj_set_style_bg_opa(volume_bar_, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(volume_bar_, LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(kBorder), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(kAccent), LV_PART_INDICATOR);
-        lv_obj_set_style_radius(volume_bar_, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_radius(volume_bar_, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
-
-        mic_pill_ = lv_obj_create(audio_panel_);
-        lv_obj_remove_style_all(mic_pill_);
-        lv_obj_set_style_bg_opa(mic_pill_, LV_OPA_COVER, 0);
-        lv_obj_set_size(mic_pill_, 180, 34);
-        lv_obj_align(mic_pill_, LV_ALIGN_TOP_MID, 0, 120);
-        lv_obj_remove_flag(mic_pill_, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_remove_flag(mic_pill_, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_pad_all(mic_pill_, 0, 0);
-        lv_obj_set_style_border_width(mic_pill_, 0, 0);
-        lv_obj_set_style_radius(mic_pill_, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_color(mic_pill_, lv_color_hex(0x1C2A3B), 0);
-        mic_label_ = lv_label_create(mic_pill_);
-        lv_obj_set_style_text_font(mic_label_, font_small_, 0);
-        lv_obj_set_style_text_color(mic_label_, lv_color_hex(kMuted), 0);
-        lv_label_set_text(mic_label_, kMicIdle);
-        lv_obj_align(mic_label_, LV_ALIGN_TOP_MID, 8, 1);
-        mic_level_bar_ = lv_bar_create(mic_pill_);
-        lv_obj_set_size(mic_level_bar_, 148, 4);
-        lv_obj_align(mic_level_bar_, LV_ALIGN_BOTTOM_MID, 0, -4);
-        lv_bar_set_range(mic_level_bar_, 0, 100);
-        lv_obj_set_style_bg_opa(mic_level_bar_, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(mic_level_bar_, LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(mic_level_bar_, lv_color_hex(kBorder), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(mic_level_bar_, lv_color_hex(kSuccess), LV_PART_INDICATOR);
-        lv_obj_set_style_radius(mic_level_bar_, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_radius(mic_level_bar_, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
-        mic_dot_ = lv_obj_create(mic_pill_);
-        lv_obj_remove_style_all(mic_dot_);
-        lv_obj_set_style_bg_opa(mic_dot_, LV_OPA_COVER, 0);
-        lv_obj_set_size(mic_dot_, 8, 8);
-        lv_obj_set_style_radius(mic_dot_, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_border_width(mic_dot_, 0, 0);
-        lv_obj_set_style_pad_all(mic_dot_, 0, 0);
-        lv_obj_remove_flag(mic_dot_, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_remove_flag(mic_dot_, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_bg_color(mic_dot_, lv_color_hex(0x475569), 0);
-        lv_obj_align(mic_dot_, LV_ALIGN_LEFT_MID, 18, -6);
+        auto* mic = card(86, "Microphone");
+        auto* capsule = lv_obj_create(mic);
+        lv_obj_remove_style_all(capsule);
+        lv_obj_set_pos(capsule, 20, 10);
+        lv_obj_set_size(capsule, 8, 16);
+        lv_obj_set_style_radius(capsule, 4, 0);
+        lv_obj_set_style_border_width(capsule, 2, 0);
+        lv_obj_set_style_border_color(capsule, lv_color_hex(kSuccess), 0);
+        lv_obj_remove_flag(capsule, LV_OBJ_FLAG_SCROLLABLE);
+        arc(mic, 15, 11, 18, 0, 180, kSuccess);
+        static const lv_point_precise_t mic_stand[] = {
+            {24, 29}, {24, 33}, {19, 33}, {29, 33}
+        };
+        line(mic, mic_stand, 4, kSuccess);
+        mic_level_bar_ = meter(mic, kSuccess);
+        mic_label_ = status(mic, "Local input / USB idle");
     }
 
     bool audio_view_ = true;  // Protected by the LVGL display lock.
     lv_obj_t* audio_panel_ = nullptr;
-    lv_obj_t* volume_label_ = nullptr;
+    lv_obj_t* speaker_status_ = nullptr;
     lv_obj_t* volume_bar_ = nullptr;
-    lv_obj_t* waves_[3] = {};
-    lv_obj_t* mute_slash_ = nullptr;
-    lv_obj_t* mic_pill_ = nullptr;
     lv_obj_t* mic_label_ = nullptr;
-    lv_obj_t* mic_dot_ = nullptr;
     lv_obj_t* mic_level_bar_ = nullptr;
     int displayed_volume_ = -1;
     int displayed_mic_ = -1;
@@ -534,7 +498,7 @@ public:
         }
         display_.UpdateUsbScreen();
         const int64_t now = esp_timer_get_time();
-        if (now - last_ui_update_us_ < 100000) return;
+        if (now - last_ui_update_us_ < 50000) return;
         last_ui_update_us_ = now;
         int volume;
         {
@@ -583,9 +547,8 @@ private:
             codec_->SetOutputVolume(std::clamp(codec_->output_volume() + delta, 0, 100));
             volume = codec_->output_volume();
         }
-        char text[32];
-        snprintf(text, sizeof(text), "Volume %d%%", volume);
-        display_.ShowNotification(text, 1500);
+        display_.ShowNotification(volume == 0 ? "Speaker muted" :
+            delta > 0 ? "Speaker volume up" : "Speaker volume down", 1500);
     }
 
     // Called with keys_mutex_: touch callbacks and polling share one state machine.
