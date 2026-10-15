@@ -146,7 +146,7 @@ void OtgMode::Run() {
         xTaskNotifyWait(0, UINT32_MAX, &events, portMAX_DELAY);
         const char* notice = nullptr;
         if (events & kToggle) {
-            notice = faulted_ ? "USB 异常，请复位" : SwitchMode();
+            notice = faulted_ ? "USB error: press RESET" : SwitchMode();
             switching_ = false;
         }
         // Reconcile current state, not a stale mount event from before handoff.
@@ -154,12 +154,12 @@ void OtgMode::Run() {
         usb_connected_ = connected;
         if (faulted_) {
             active_ = false;
-            SetUsbStatus("USB 异常");
+            SetUsbStatus("USB Error");
         } else if (connected) {
             Enter();
         } else {
             active_ = false;
-            SetUsbStatus(native_ ? "USB 调试" : "");
+            SetUsbStatus(native_ ? "USB Debug" : "");
         }
         // SetStatus hides notifications, so present results AFTER reconciliation.
         if (notice && display_) display_->ShowNotification(notice, 3500);
@@ -170,9 +170,12 @@ void OtgMode::Run() {
 const char* OtgMode::SwitchMode() {
 #if CONFIG_USB_AUDIO_DEVICE
     auto& usb = UsbAudio::GetInstance();
+    // Reserve the handoff against concurrent SET_INTERFACE requests.
+    // A muted microphone is still an active recording stream.
+    if (!native_ && !usb.TryBeginModeSwitch()) return "Mic in use: USB mode locked";
     active_ = false;
     usb_connected_ = false;
-    SetUsbStatus(native_ ? "切换到音频模式" : "切换到调试模式");
+    SetUsbStatus(native_ ? "Switching to audio" : "Switching to debug");
 
     bool success = false;
     if (!native_) {
@@ -206,10 +209,10 @@ const char* OtgMode::SwitchMode() {
         }
     }
     if (success) {
-        if (!SaveMode(native_)) return "切换成功，保存失败";
-        return native_ ? "长按 BOOT 返回音频" : "等待电脑识别音频";
+        if (!SaveMode(native_)) return "Switched; save failed";
+        return native_ ? "Hold BOOT to return" : "Waiting for USB host";
     }
-    return faulted_ ? "USB 异常，请复位" : "失败，已保留原模式";
+    return faulted_ ? "USB error: press RESET" : "Failed; mode unchanged";
 #else
     return nullptr;
 #endif

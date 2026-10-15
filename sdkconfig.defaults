@@ -9,7 +9,8 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/v2/16m.csv"
 
 ## UI uses a built-in font; no downloaded assets or speech models are required.
 CONFIG_FLASH_NONE_ASSETS=y
-CONFIG_LANGUAGE_ZH_CN=y
+CONFIG_LANGUAGE_EN_US=y
+CONFIG_LV_USE_TINY_TTF=y
 
 ## Native 48kHz / mono / 16-bit USB speaker + microphone.
 ## Chord or BOOT long press switches to/from native Serial/JTAG without reboot.

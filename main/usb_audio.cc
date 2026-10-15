@@ -100,7 +100,7 @@ static const tusb_desc_device_t kDescDevice = {
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = 0x303A,
     .idProduct = 0x2986,
-    .bcdDevice = 0x0104,
+    .bcdDevice = 0x0105,
     .iManufacturer = 1,
     .iProduct = 2,
     .iSerialNumber = 3,
@@ -108,8 +108,9 @@ static const tusb_desc_device_t kDescDevice = {
 };
 static const char kLanguage[] = {0x09, 0x04};
 static const char* kStrings[] = {
-    kLanguage, "ESP32-S3", "S3_R240x240_Ergb16_Fps5_Bl113", "0001", "ESP32S3 Speaker",
-    "Media Control", "ESP32S3 MIC", "S3_R240x240_Ergb16_Fps5_Bl113",
+    // The host driver parses iProduct for resolution, encoding and frame rate.
+    kLanguage, "ESP32-S3", "ESP32S3 Display_R240x240_Ergb16_Fps5_Bl113", "0001", "ESP32S3 Speaker",
+    "Media Control", "ESP32S3 MIC", "ESP32S3 Display",
 };
 
 extern "C" {
@@ -164,7 +165,7 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t, uint8_t func, uint8_t, uint8_t alt) 
 
 bool tud_audio_set_itf_cb(uint8_t, const tusb_control_request_t* request) {
     if ((request->wIndex & 0xff) == ITF_MIC_AS) {
-        UsbAudio::GetInstance().OnMicrophoneInterface(request->wValue == 1);
+        return UsbAudio::GetInstance().OnMicrophoneInterface(request->wValue == 1);
     }
     return true;
 }
@@ -196,6 +197,11 @@ bool UsbAudio::Initialize(const Config& config, bool enable) {
         configured_ = true;
     }
     if (!enable) return true;
+    {
+        std::lock_guard<std::mutex> state_lock(mic_state_mutex_);
+        mode_handoff_ = false;
+        mic_muted_ = false;
+    }
     if (config_.mic_enabled) {
         mic_ringbuf_ = xRingbufferCreate(UAC_SAMPLE_RATE * sizeof(int16_t) / 5, RINGBUF_TYPE_BYTEBUF);
         if (!mic_ringbuf_) return false;
@@ -324,8 +330,23 @@ bool UsbAudio::SendMicrophoneData(const int16_t* pcm, size_t samples) {
     return xRingbufferSend((RingbufHandle_t)mic_ringbuf_, pcm, samples * sizeof(int16_t), 0) == pdTRUE;
 }
 
-void UsbAudio::OnMicrophoneInterface(bool active) {
-    if (!initialized_) return;
+bool UsbAudio::TryBeginModeSwitch() {
+    std::lock_guard<std::mutex> lock(mic_state_mutex_);
+    if (IsMicrophoneActive()) return false;
+    mode_handoff_ = true;
+    return true;
+}
+
+bool UsbAudio::ToggleMicrophoneMute() {
+    std::lock_guard<std::mutex> lock(mic_state_mutex_);
+    if (!IsMicrophoneActive()) return false;
+    mic_muted_ = !mic_muted_.load();
+    return true;
+}
+
+bool UsbAudio::OnMicrophoneInterface(bool active) {
+    std::lock_guard<std::mutex> lock(mic_state_mutex_);
+    if (!initialized_ || (active && mode_handoff_)) return false;
     mic_streaming_ = false;
     if (mic_ringbuf_) {
         size_t bytes;
@@ -335,7 +356,9 @@ void UsbAudio::OnMicrophoneInterface(bool active) {
         }
     }
     mic_streaming_ = active;
+    if (!active) mic_muted_ = false;
     ESP_LOGI(TAG, "USB microphone stream %s", active ? "started" : "stopped");
+    return true;
 }
 
 void UsbAudio::FeedMicrophone() {
@@ -353,6 +376,9 @@ void UsbAudio::FeedMicrophone() {
             vRingbufferReturnItem((RingbufHandle_t)mic_ringbuf_, item);
         }
     }
+    // Drain queued PCM even while muted, but only transmit silence. This also
+    // prevents old recorded samples from being replayed when unmuting.
+    if (mic_muted_) memset(frame, 0, sizeof(frame));
     tud_audio_n_write(AUDIO_FUNC_MIC, frame, sizeof(frame));
 }
 
@@ -377,11 +403,15 @@ void UsbAudio::OnMounted() {
     NotifyConnection(true);
 }
 void UsbAudio::OnUnmounted() {
+    {
+        std::lock_guard<std::mutex> lock(mic_state_mutex_);
+        connected_ = false;
+        mic_streaming_ = false;
+        mic_muted_ = false;
+    }
     UsbScreen::Reset();
     if (!initialized_) return;
     media_.Reset();
-    connected_ = false;
-    mic_streaming_ = false;
     ESP_LOGI(TAG, "USB host disconnected");
     NotifyConnection(false);
 }

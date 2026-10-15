@@ -87,6 +87,7 @@ void UsbAudioBridge::PlaybackBlock(std::vector<int16_t>& pcm) {
     }
     // Blocking I2S writes clock the task; silence keeps the duplex codec and
     // backlight stable while disconnected, suspended or in Serial/JTAG mode.
+    playback_level_ = level_meter_.Update(pcm.data(), pcm.size());
     codec_->OutputData(pcm);
 }
 

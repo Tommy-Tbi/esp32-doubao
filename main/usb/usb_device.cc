@@ -1,4 +1,6 @@
 #include "usb_device.h"
+#include "brightness_keys.h"
+#include "usb_backlight.h"
 #include "usb_screen.h"
 #include <esp_heap_caps.h>
 #include "usb_audio_bridge.h"
@@ -25,9 +27,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-LV_FONT_DECLARE(font_puhui_20_4);
-LV_FONT_DECLARE(font_puhui_14_1);
-constexpr const char* kKeyHint = "左右键同按 3 秒切换";
+#include "usb_font_data.h"
+#if !LV_USE_TINY_TTF
+#error "USB UI requires CONFIG_LV_USE_TINY_TTF=y"
+#endif
+constexpr const char* kKeyHint = "Top 2s: Light | +/- 3s: USB";
 
 namespace {
 constexpr const char* kVolumeFormat = "%d%%";
@@ -77,8 +81,7 @@ public:
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_, true));
         const esp_err_t display_on = esp_lcd_panel_disp_on_off(panel_, true);
         if (display_on != ESP_ERR_NOT_SUPPORTED) ESP_ERROR_CHECK(display_on);
-        ESP_ERROR_CHECK(gpio_set_direction(DISPLAY_BACKLIGHT_PIN, GPIO_MODE_OUTPUT));
-        ESP_ERROR_CHECK(gpio_set_level(DISPLAY_BACKLIGHT_PIN, 1));
+        // GPIO46 is owned by UsbBacklight, including while audio is active.
 
         lv_init();
         lvgl_port_cfg_t port = ESP_LVGL_PORT_INIT_CONFIG();
@@ -106,19 +109,23 @@ public:
         ESP_ERROR_CHECK(lcd ? ESP_OK : ESP_FAIL);
         lv_display_set_offset(lcd, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y);
         DisplayLockGuard lock(this);
+        font_small_ = lv_tiny_ttf_create_data(kUsbFontData, sizeof(kUsbFontData), 16);
+        font_body_ = lv_tiny_ttf_create_data(kUsbFontData, sizeof(kUsbFontData), 20);
+        font_large_ = lv_tiny_ttf_create_data(kUsbFontData, sizeof(kUsbFontData), 38);
+        ESP_ERROR_CHECK(font_small_ && font_body_ && font_large_ ? ESP_OK : ESP_ERR_NO_MEM);
         auto* screen = lv_display_get_screen_active(lcd);
         // Do not depend on a theme to supply an opaque background. In partial
         // RGB565 rendering, every dirty region must repaint its old pixels.
         lv_obj_remove_style_all(screen);
         lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(screen, lv_color_hex(kBackground), 0);
-        lv_obj_set_style_text_font(screen, &font_puhui_20_4, 0);
+        lv_obj_set_style_text_font(screen, font_body_, 0);
         lv_obj_set_style_text_color(screen, lv_color_hex(kText), 0);
         lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
-        auto label = [screen](lv_align_t align, int y) {
+        auto label = [this, screen](lv_align_t align, int y) {
             auto* result = lv_label_create(screen);
             lv_obj_set_width(result, LV_PCT(90));
-            lv_obj_set_style_text_font(result, &font_puhui_20_4, 0);
+            lv_obj_set_style_text_font(result, font_body_, 0);
             lv_label_set_long_mode(result, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_align(result, LV_TEXT_ALIGN_CENTER, 0);
             lv_obj_set_style_text_line_space(result, 2, 0);
@@ -126,22 +133,22 @@ public:
             return result;
         };
         auto* brand = lv_label_create(screen);
-        lv_obj_set_style_text_font(brand, &font_puhui_14_1, 0);
+        lv_obj_set_style_text_font(brand, font_small_, 0);
         lv_obj_set_style_text_color(brand, lv_color_hex(kMuted), 0);
         lv_label_set_text(brand, "SPARKBOT");
         lv_obj_align(brand, LV_ALIGN_TOP_LEFT, 16, 14);
         status_ = label(LV_ALIGN_TOP_RIGHT, 12);
         lv_obj_set_width(status_, 126);
-        lv_obj_set_style_text_font(status_, &font_puhui_14_1, 0);
+        lv_obj_set_style_text_font(status_, font_small_, 0);
         lv_obj_set_style_text_align(status_, LV_TEXT_ALIGN_RIGHT, 0);
         lv_obj_align(status_, LV_ALIGN_TOP_RIGHT, -16, 14);
         lv_obj_set_style_text_color(status_, lv_color_hex(kAccent), 0);
-        lv_label_set_text(status_, "USB 音频");
+        lv_label_set_text(status_, "USB Audio");
         InitializeContentPanel(screen);
         InitializeAudioPanel();
         footer_ = label(LV_ALIGN_BOTTOM_MID, -8);
         lv_obj_set_style_text_color(footer_, lv_color_hex(kMuted), 0);
-        lv_obj_set_style_text_font(footer_, &font_puhui_14_1, 0);
+        lv_obj_set_style_text_font(footer_, font_small_, 0);
         lv_label_set_text(footer_, kKeyHint);
         notice_timer_ = lv_timer_create([](lv_timer_t* timer) {
             auto* self = static_cast<UsbDisplay*>(lv_timer_get_user_data(timer));
@@ -157,6 +164,52 @@ public:
         lv_obj_align(screen_canvas_, LV_ALIGN_TOP_LEFT, 0, 0);
         lv_obj_add_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
         ESP_ERROR_CHECK(UsbScreen::Initialize() ? ESP_OK : ESP_ERR_NO_MEM);
+        // Top layer remains visible above both the local UI and USB canvas.
+        brightness_panel_ = lv_obj_create(lv_layer_top());
+        lv_obj_set_size(brightness_panel_, 216, 150);
+        lv_obj_center(brightness_panel_);
+        lv_obj_remove_flag(brightness_panel_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(brightness_panel_, lv_color_hex(kSurface), 0);
+        lv_obj_set_style_bg_opa(brightness_panel_, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(brightness_panel_, lv_color_hex(kAccent), 0);
+        lv_obj_set_style_text_color(brightness_panel_, lv_color_hex(kText), 0);
+        lv_obj_set_style_text_font(brightness_panel_, font_body_, 0);
+        brightness_title_ = lv_label_create(brightness_panel_);
+        lv_obj_align(brightness_title_, LV_ALIGN_TOP_MID, 0, 0);
+        brightness_value_ = lv_label_create(brightness_panel_);
+        lv_obj_set_style_text_font(brightness_value_, font_large_, 0);
+        lv_obj_align(brightness_value_, LV_ALIGN_TOP_MID, 0, 23);
+        brightness_bar_ = lv_bar_create(brightness_panel_);
+        lv_obj_set_size(brightness_bar_, 170, 8);
+        lv_obj_align(brightness_bar_, LV_ALIGN_TOP_MID, 0, 70);
+        lv_bar_set_range(brightness_bar_, 0, 100);
+        lv_obj_set_style_bg_color(brightness_bar_, lv_color_hex(kAccent), LV_PART_INDICATOR);
+        auto* hint = lv_label_create(brightness_panel_);
+        lv_obj_set_style_text_font(hint, font_small_, 0);
+        lv_label_set_text(hint, "+/- Adjust   Top: Done");
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_add_flag(brightness_panel_, LV_OBJ_FLAG_HIDDEN);
+        brightness_timer_ = lv_timer_create([](lv_timer_t* timer) {
+            auto* self = static_cast<UsbDisplay*>(lv_timer_get_user_data(timer));
+            lv_obj_add_flag(self->brightness_panel_, LV_OBJ_FLAG_HIDDEN);
+            lv_timer_pause(timer);
+        }, 1200, this);
+        lv_timer_pause(brightness_timer_);
+    }
+
+    void ShowBrightness(int value, bool editing, bool saved = true) {
+        DisplayLockGuard lock(this);
+        lv_timer_pause(brightness_timer_);
+        lv_label_set_text(brightness_title_, editing ? "Brightness" : saved ? "Brightness saved" : "Save failed");
+        char text[16];
+        snprintf(text, sizeof(text), "%d%%", value);
+        lv_label_set_text(brightness_value_, text);
+        lv_bar_set_value(brightness_bar_, value, LV_ANIM_OFF);
+        lv_obj_remove_flag(brightness_panel_, LV_OBJ_FLAG_HIDDEN);
+        if (!editing) {
+            lv_timer_reset(brightness_timer_);
+            lv_timer_resume(brightness_timer_);
+        }
     }
 
     void UpdateUsbScreen() {
@@ -173,8 +226,8 @@ public:
 
     void SetStatus(const char* text) override {
         DisplayLockGuard lock(this);
-        lv_label_set_text(status_, text && text[0] ? text : "USB 音频");
-        const bool audio = !text || !text[0] || std::strcmp(text, "USB 音频") == 0;
+        lv_label_set_text(status_, text && text[0] ? text : "USB Audio");
+        const bool audio = !text || !text[0] || std::strcmp(text, "USB Audio") == 0;
         if (audio != audio_view_) {
             // One content tree: destroy the previous view, never cover it.
             lv_obj_clean(audio_panel_);
@@ -188,7 +241,7 @@ public:
             } else {
                 body_ = lv_label_create(audio_panel_);
                 lv_obj_set_width(body_, 188);
-                lv_obj_set_style_text_font(body_, &font_puhui_20_4, 0);
+                lv_obj_set_style_text_font(body_, font_body_, 0);
                 lv_obj_set_style_text_color(body_, lv_color_hex(kText), 0);
                 lv_obj_set_style_text_align(body_, LV_TEXT_ALIGN_CENTER, 0);
                 lv_obj_set_style_text_line_space(body_, 8, 0);
@@ -198,12 +251,12 @@ public:
         }
         if (!audio) {
             lv_obj_add_flag(screen_canvas_, LV_OBJ_FLAG_HIDDEN);
-            const bool debug = std::strcmp(text, "USB 调试") == 0;
-            const bool error = std::strcmp(text, "USB 异常") == 0;
+            const bool debug = std::strcmp(text, "USB Debug") == 0;
+            const bool error = std::strcmp(text, "USB Error") == 0;
             lv_label_set_text(body_, debug ?
-                "原生 Serial/JTAG\n左右键同按 3 秒\n返回 USB 音频" : error ?
-                "USB 初始化失败\n已停止切换以防冲突\n按 RESET 复位设备" :
-                "正在交接 USB 接口\n电脑将自动重新识别\n无需拔线或重启");
+                "Native Serial/JTAG\nHold +/- for 3s\nto return to audio" : error ?
+                "USB initialization failed\nSwitching disabled\nPress RESET to recover" :
+                "Switching USB mode\nHost will reconnect\nNo restart needed");
             lv_obj_set_style_text_color(status_,
                 lv_color_hex(error ? kWarning : kAccent), 0);
         } else {
@@ -222,16 +275,16 @@ public:
         lv_timer_resume(notice_timer_);
     }
 
-    void UpdateAudioState(int volume, bool mic_in_use) {
+    void UpdateAudioState(int volume, bool mic_in_use, bool mic_muted = false, int level = 0) {
         volume = std::clamp(volume, 0, 100);
         DisplayLockGuard lock(this);
         if (!audio_view_) return;
+        lv_bar_set_value(volume_bar_, level, LV_ANIM_OFF);
         if (volume != displayed_volume_) {
             displayed_volume_ = volume;
             char text[16];
             snprintf(text, sizeof(text), kVolumeFormat, volume);
             lv_label_set_text(volume_label_, text);
-            lv_bar_set_value(volume_bar_, volume, LV_ANIM_OFF);
             lv_obj_set_style_text_color(volume_label_,
                 lv_color_hex(volume == 0 ? kMuted : kText), 0);
             const int waves = volume == 0 ? 0 : volume <= 33 ? 1 : volume <= 66 ? 2 : 3;
@@ -242,13 +295,14 @@ public:
             if (volume == 0) lv_obj_remove_flag(mute_slash_, LV_OBJ_FLAG_HIDDEN);
             else lv_obj_add_flag(mute_slash_, LV_OBJ_FLAG_HIDDEN);
         }
-        if (displayed_mic_ != static_cast<int>(mic_in_use)) {
-            displayed_mic_ = mic_in_use;
-            lv_label_set_text(mic_label_, mic_in_use ? kMicInUse : kMicIdle);
+        const int mic_state = !mic_in_use ? 0 : mic_muted ? 2 : 1;
+        if (displayed_mic_ != mic_state) {
+            displayed_mic_ = mic_state;
+            lv_label_set_text(mic_label_, mic_state == 2 ? "Mic muted" : mic_in_use ? kMicInUse : kMicIdle);
             lv_obj_set_style_text_color(mic_label_,
-                lv_color_hex(mic_in_use ? kSuccess : kMuted), 0);
+                lv_color_hex(mic_state == 2 ? kWarning : mic_in_use ? kSuccess : kMuted), 0);
             lv_obj_set_style_bg_color(mic_dot_,
-                lv_color_hex(mic_in_use ? kSuccess : 0x475569), 0);
+                lv_color_hex(mic_state == 2 ? kWarning : mic_in_use ? kSuccess : 0x475569), 0);
             lv_obj_set_style_bg_color(mic_pill_,
                 lv_color_hex(mic_in_use ? 0x173B35 : 0x1C2A3B), 0);
         }
@@ -259,6 +313,14 @@ protected:
     void Unlock() override { lvgl_port_unlock(); }
 
 private:
+    lv_obj_t* brightness_panel_ = nullptr;
+    lv_obj_t* brightness_title_ = nullptr;
+    lv_obj_t* brightness_value_ = nullptr;
+    lv_obj_t* brightness_bar_ = nullptr;
+    lv_timer_t* brightness_timer_ = nullptr;
+    lv_font_t* font_small_ = nullptr;
+    lv_font_t* font_body_ = nullptr;
+    lv_font_t* font_large_ = nullptr;
     uint8_t* screen_pixels_ = nullptr;
     lv_obj_t* screen_canvas_ = nullptr;
     void InitializeContentPanel(lv_obj_t* screen) {
@@ -298,29 +360,44 @@ private:
         static const lv_point_precise_t speaker[] = {
             {8, 22}, {20, 22}, {34, 10}, {34, 50}, {20, 38}, {8, 38}, {8, 22}
         };
-        static const lv_point_precise_t wave1[] = {{42, 22}, {46, 30}, {42, 38}};
-        static const lv_point_precise_t wave2[] = {{50, 16}, {57, 30}, {50, 44}};
-        static const lv_point_precise_t wave3[] = {{60, 10}, {69, 30}, {60, 50}};
         static const lv_point_precise_t slash[] = {{6, 8}, {70, 52}};
         line(speaker, 7, kAccent);
-        waves_[0] = line(wave1, 3, kAccent);
-        waves_[1] = line(wave2, 3, kAccent);
-        waves_[2] = line(wave3, 3, kAccent);
+        // True circular wavefronts, not three-point chevrons.
+        for (int i = 0; i < 3; ++i) {
+            const int radius = 14 + i * 9;
+            waves_[i] = lv_arc_create(icon);
+            lv_obj_remove_style_all(waves_[i]);
+            lv_obj_set_size(waves_[i], radius * 2, radius * 2);
+            lv_obj_set_pos(waves_[i], 36 - radius, 30 - radius);
+            lv_obj_remove_flag(waves_[i], LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_remove_flag(waves_[i], LV_OBJ_FLAG_SCROLLABLE);
+            lv_arc_set_bg_angles(waves_[i], 0, 0);
+            lv_arc_set_angles(waves_[i], 320, 40);
+            lv_obj_set_style_arc_width(waves_[i], 3, LV_PART_INDICATOR);
+            lv_obj_set_style_arc_rounded(waves_[i], true, LV_PART_INDICATOR);
+            lv_obj_set_style_arc_color(waves_[i], lv_color_hex(kAccent), LV_PART_INDICATOR);
+            lv_obj_set_style_arc_opa(waves_[i], LV_OPA_COVER, LV_PART_INDICATOR);
+        }
         mute_slash_ = line(slash, 2, kWarning);
         lv_obj_add_flag(mute_slash_, LV_OBJ_FLAG_HIDDEN);
 
         auto* caption = lv_label_create(audio_panel_);
-        lv_obj_set_style_text_font(caption, &font_puhui_14_1, 0);
+        lv_obj_set_style_text_font(caption, font_small_, 0);
         lv_obj_set_style_text_color(caption, lv_color_hex(kMuted), 0);
         lv_label_set_text(caption, "VOLUME");
         lv_obj_align(caption, LV_ALIGN_TOP_RIGHT, -16, 18);
         volume_label_ = lv_label_create(audio_panel_);
-        lv_obj_set_style_text_font(volume_label_, &lv_font_montserrat_36, 0);
+        lv_obj_set_style_text_font(volume_label_, font_large_, 0);
         lv_label_set_text(volume_label_, "--%");
         lv_obj_align(volume_label_, LV_ALIGN_TOP_RIGHT, -14, 40);
+        auto* level_caption = lv_label_create(audio_panel_);
+        lv_obj_set_style_text_font(level_caption, font_small_, 0);
+        lv_obj_set_style_text_color(level_caption, lv_color_hex(kMuted), 0);
+        lv_label_set_text(level_caption, "USB LEVEL");
+        lv_obj_align(level_caption, LV_ALIGN_TOP_MID, 0, 82);
         volume_bar_ = lv_bar_create(audio_panel_);
         lv_obj_set_size(volume_bar_, 180, 6);
-        lv_obj_align(volume_bar_, LV_ALIGN_TOP_MID, 0, 98);
+        lv_obj_align(volume_bar_, LV_ALIGN_TOP_MID, 0, 104);
         lv_bar_set_range(volume_bar_, 0, 100);
         lv_obj_set_style_bg_opa(volume_bar_, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(volume_bar_, LV_OPA_COVER, LV_PART_INDICATOR);
@@ -341,7 +418,7 @@ private:
         lv_obj_set_style_radius(mic_pill_, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_color(mic_pill_, lv_color_hex(0x1C2A3B), 0);
         mic_label_ = lv_label_create(mic_pill_);
-        lv_obj_set_style_text_font(mic_label_, &font_puhui_14_1, 0);
+        lv_obj_set_style_text_font(mic_label_, font_small_, 0);
         lv_obj_set_style_text_color(mic_label_, lv_color_hex(kMuted), 0);
         lv_label_set_text(mic_label_, kMicIdle);
         lv_obj_align(mic_label_, LV_ALIGN_CENTER, 8, 0);
@@ -389,14 +466,18 @@ public:
             .flags = { .enable_internal_pullup = true },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c, &i2c_bus_));
+        backlight_.Initialize(DISPLAY_BACKLIGHT_PIN);
+        brightness_keys_.Initialize(backlight_.Saved());
         display_.Initialize();
         codec_ = new Es8311AudioCodec(i2c_bus_, I2C_NUM_0,
             AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
             AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
             AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
-            AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR);
+            GPIO_NUM_NC, AUDIO_CODEC_ES8311_ADDR); // Shared PA/BL pin owned by PWM.
         ESP_ERROR_CHECK(bridge_.Initialize(codec_) ? ESP_OK : ESP_FAIL);
         ESP_ERROR_CHECK(bridge_.Start() ? ESP_OK : ESP_FAIL);
+        vTaskDelay(pdMS_TO_TICKS(150)); // Initial shared PA enable settling time.
+        backlight_.Set(brightness_keys_.Value());
         display_.UpdateAudioState(codec_->output_volume(), false);
         OtgMode::GetInstance().Begin(&display_);
         InitializeKeys();
@@ -404,7 +485,11 @@ public:
 
 public:
     void PollKeys() {
-        combo_.Poll();
+        {
+            std::lock_guard<std::mutex> lock(keys_mutex_);
+            ApplyBrightnessAction(brightness_keys_.Poll(esp_timer_get_time()));
+            if (!brightness_keys_.Editing()) combo_.Poll();
+        }
         display_.UpdateUsbScreen();
         const int64_t now = esp_timer_get_time();
         if (now - last_ui_update_us_ < 100000) return;
@@ -414,7 +499,8 @@ public:
             std::lock_guard<std::mutex> lock(volume_mutex_);
             volume = codec_->output_volume();
         }
-        display_.UpdateAudioState(volume, UsbAudio::GetInstance().IsMicrophoneActive());
+        display_.UpdateAudioState(volume, UsbAudio::GetInstance().IsMicrophoneActive(),
+            UsbAudio::GetInstance().IsMicrophoneMuted(), bridge_.PlaybackLevel());
     }
 
 private:
@@ -423,6 +509,9 @@ private:
     Es8311AudioCodec* codec_ = nullptr;
     UsbAudioBridge bridge_;
     ComboKeyDetector combo_;
+    UsbBacklight backlight_;
+    BrightnessKeys brightness_keys_;
+    std::mutex keys_mutex_;
     Button boot_{BOOT_BUTTON_GPIO, false, 5000, 0};
     TouchButton* touch_[TOUCH_BUTTON_NUM] = {};
     int64_t last_media_touch_us_ = -350000;
@@ -434,7 +523,14 @@ private:
         if (now - last_media_touch_us_ < 350000) return;
         last_media_touch_us_ = now;
         if (OtgMode::GetInstance().IsBlocked()) return;
-        const bool queued = UsbAudio::GetInstance().RequestPlayPause();
+        auto& usb = UsbAudio::GetInstance();
+        if (usb.IsMicrophoneActive()) {
+            if (usb.ToggleMicrophoneMute()) {
+                display_.ShowNotification(usb.IsMicrophoneMuted() ? "Mic muted" : "Mic unmuted", 1500);
+            }
+            return;
+        }
+        const bool queued = usb.RequestPlayPause();
         display_.ShowNotification(queued ? "Play/Pause requested" : "Media control unavailable", 1500);
     }
 
@@ -446,8 +542,38 @@ private:
             volume = codec_->output_volume();
         }
         char text[32];
-        snprintf(text, sizeof(text), "音量 %d%%", volume);
+        snprintf(text, sizeof(text), "Volume %d%%", volume);
         display_.ShowNotification(text, 1500);
+    }
+
+    // Called with keys_mutex_: touch callbacks and polling share one state machine.
+    void ApplyBrightnessAction(int action) {
+        if (action & (BrightnessKeys::Refresh | BrightnessKeys::Closed)) combo_.Reset();
+        if (action & BrightnessKeys::Refresh) {
+            backlight_.Set(brightness_keys_.Value());
+            display_.ShowBrightness(brightness_keys_.Value(), true);
+        }
+        if (action & BrightnessKeys::Closed) {
+            const bool saved = backlight_.Save(brightness_keys_.Value());
+            display_.ShowBrightness(brightness_keys_.Value(), false, saved);
+        }
+        if ((action & BrightnessKeys::Media) && !combo_.IsComboActive()) PlayPause();
+    }
+
+    void OnTouch(int id, bool down) {
+        std::lock_guard<std::mutex> lock(keys_mutex_);
+        ApplyBrightnessAction(brightness_keys_.Poll(esp_timer_get_time()));
+        if (brightness_keys_.IsDown(id) == down) return;
+        const bool was_editing = brightness_keys_.Editing();
+        const int action = brightness_keys_.Key(id, down, esp_timer_get_time());
+        ApplyBrightnessAction(action);
+        if (id == 0 || was_editing || brightness_keys_.Editing()) return;
+        if (down) combo_.PressDown(id);
+        else {
+            const bool chord = combo_.IsComboActive();
+            combo_.PressUp(id);
+            if (!chord) ChangeVolume(id == 1 ? -10 : 10);
+        }
     }
 
     void InitializeKeys() {
@@ -455,22 +581,17 @@ private:
         boot_.OnPressDown([this]() { combo_.PressDown(COMBO_KEY_BOOT); });
         boot_.OnPressUp([this]() { combo_.PressUp(COMBO_KEY_BOOT); });
         boot_.OnLongPress([this]() {
-            if (!combo_.IsComboActive()) OtgMode::GetInstance().ToggleByKeys();
+            std::lock_guard<std::mutex> lock(keys_mutex_);
+            if (!brightness_keys_.Editing() && !combo_.IsComboActive())
+                OtgMode::GetInstance().ToggleByKeys();
         });
         const int pads[] = {TOUCH_BUTTON_PAD_1, TOUCH_BUTTON_PAD_2, TOUCH_BUTTON_PAD_3};
         const float sensitivity[] = {TOUCH_BUTTON_SENSITIVITY_1,
             TOUCH_BUTTON_SENSITIVITY_2, TOUCH_BUTTON_SENSITIVITY_3};
         for (int i = 0; i < TOUCH_BUTTON_NUM; ++i) {
             touch_[i] = new TouchButton(pads[i], sensitivity[i]);
-            touch_[i]->OnPress([this, i]() { combo_.PressDown(i); });
-            touch_[i]->OnRelease([this, i]() {
-                // Decide before PressUp clears the chord latch on its last key.
-                const bool chord = combo_.IsComboActive();
-                combo_.PressUp(i);
-                if (!chord && i == 0) PlayPause();
-                if (!chord && i == 1) ChangeVolume(-10);
-                if (!chord && i == 2) ChangeVolume(10);
-            });
+            touch_[i]->OnPress([this, i]() { OnTouch(i, true); });
+            touch_[i]->OnRelease([this, i]() { OnTouch(i, false); });
         }
         TouchButton::StartAll();
     }

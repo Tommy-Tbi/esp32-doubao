@@ -22,6 +22,24 @@ TEST = r'''
 #undef private
 
 int main() {
+    // Real level-meter implementation: silence, full-scale negative sample,
+    // -20 dBFS mapping, monotonic release, and eventual zero.
+    AudioLevel meter;
+    int16_t sample = 0;
+    assert(meter.Update(&sample, 1) == 0);
+    sample = INT16_MIN;
+    assert(meter.Update(&sample, 1) == 100);
+    sample = 0;
+    int previous = 100;
+    for (int i = 0; i < 35; ++i) {
+        int level = meter.Update(&sample, 1);
+        assert(level <= previous && level >= 0);
+        previous = level;
+    }
+    assert(previous == 0);
+    sample = 3277;
+    assert(meter.Update(&sample, 1) >= 66 && meter.Update(&sample, 1) <= 67);
+
     auto& mode = OtgMode::GetInstance();
     auto& usb = UsbAudio::GetInstance();
     Display display;
@@ -31,7 +49,7 @@ int main() {
         owner.clear();
         boot_native = notifications = phy_installs = 0;
         fail_install = fail_release = fail_save = false;
-        usb.initialized = usb.connected = false;
+        usb.initialized = usb.connected = usb.mic_active = false;
         usb.fail_resume = usb.fail_uninstall = false;
         mode.native_ = mode.switching_ = false;
         mode.faulted_ = false;
@@ -54,6 +72,14 @@ int main() {
     reset(); boot_native = 1; boot();
     assert(mode.native_ && owner == "native");
     mode.SwitchMode(); assert(owner == "audio");
+
+    // Recording (including local mute) must keep USB audio attached.
+    reset(); boot(); usb.connected = usb.mic_active = true;
+    assert(std::string(mode.SwitchMode()).find("Mic in use") != std::string::npos);
+    assert(!mode.native_ && owner == "audio" && phy_installs == 0);
+    usb.mic_active = false;
+    mode.SwitchMode();
+    assert(mode.native_ && owner == "native");
 
     // Failed OTG teardown must never acquire another PHY.
     reset(); boot(); usb.fail_uninstall = true;
@@ -79,7 +105,7 @@ int main() {
     reset(); boot(); fail_save = true;
     const char* result = mode.SwitchMode();
     assert(mode.native_ && owner == "native" && !mode.faulted_);
-    assert(std::string(result).find("保存失败") != std::string::npos);
+    assert(std::string(result).find("save failed") != std::string::npos);
 
     // Duplicate requests while switching are ignored.
     reset(); mode.task_ = reinterpret_cast<void*>(1);
@@ -236,7 +262,7 @@ def main():
     for obj in ("screen", "audio_panel_", "mic_pill_", "mic_dot_"):
         assert f"lv_obj_set_style_bg_opa({obj}, LV_OPA_COVER, 0);" in ui_source
     assert "lv_obj_invalidate(lv_obj_get_screen(audio_panel_));" in ui_source
-    assert "lv_obj_set_style_text_font(body_, &font_puhui_20_4, 0);" in ui_source
+    assert "lv_obj_set_style_text_font(body_, font_body_, 0);" in ui_source
     out = ROOT / ".tmp" / "usb_hot_switch_test"
     out.mkdir(parents=True, exist_ok=True)
     for name in ("esp_log.h", "lvgl.h", "nvs_flash.h", "usb_audio.h", "display.h",

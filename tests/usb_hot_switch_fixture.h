@@ -123,6 +123,7 @@ struct UsbAudio {
         return true;
     }
     bool IsMicrophoneActive() const { return mic_active && initialized && connected; }
+    bool TryBeginModeSwitch() { return !IsMicrophoneActive(); }
     bool SendMicrophoneData(const int16_t* p, size_t n) {
         assert(IsMicrophoneActive());
         if (fail_send) return false;

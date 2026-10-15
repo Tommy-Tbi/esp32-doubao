@@ -9,6 +9,14 @@ idf_build_get_property(BUILD_COMPONENTS BUILD_COMPONENTS)
 set(FIRMWARE_USB_DIR "${CMAKE_CURRENT_LIST_DIR}")
 get_filename_component(FIRMWARE_ROOT "${FIRMWARE_USB_DIR}/.." ABSOLUTE)
 
+# Embed the OFL-licensed outline font without a filesystem or external assets.
+file(READ "${FIRMWARE_USB_DIR}/fonts/Abel-Regular.ttf" USB_FONT_HEX HEX)
+string(REGEX REPLACE "(..)" "0x\\1," USB_FONT_BYTES "${USB_FONT_HEX}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/usb_font_data.h"
+    "static const unsigned char kUsbFontData[] = {${USB_FONT_BYTES}};\n")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${FIRMWARE_USB_DIR}/fonts/Abel-Regular.ttf")
+
 idf_component_register(
     SRCS
         "${FIRMWARE_ROOT}/main.cc"
@@ -24,6 +32,7 @@ idf_component_register(
         "${FIRMWARE_ROOT}/boards/esp-sparkbot/sparkbot_keys.cc"
         "${FIRMWARE_ROOT}/boards/esp-sparkbot/otg_mode.cc"
     INCLUDE_DIRS
+        "${CMAKE_CURRENT_BINARY_DIR}"
         "${FIRMWARE_ROOT}"
         "${FIRMWARE_ROOT}/audio"
         "${FIRMWARE_ROOT}/display"

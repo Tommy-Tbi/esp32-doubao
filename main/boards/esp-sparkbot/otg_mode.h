@@ -18,7 +18,7 @@ public:
     bool IsActive() const { return active_.load(); }
     bool IsBlocked() const { return native_.load(); }
     void ToggleByKeys(uint32_t key_mask = 0);
-    static const char* StatusText() { return "USB 音频"; }
+    static const char* StatusText() { return "USB Audio"; }
 
 private:
     OtgMode() = default;

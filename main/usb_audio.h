@@ -36,6 +36,9 @@ public:
 
     // Queue one USB Consumer Play/Pause click; false if unavailable/busy.
     bool RequestPlayPause();
+    bool ToggleMicrophoneMute();
+    bool IsMicrophoneMuted() const { return mic_muted_; }
+    bool TryBeginModeSwitch();
 
     void Start();
     void Stop();
@@ -70,7 +73,7 @@ public:
     void OnMounted();
     void OnUnmounted();
     void FeedMicrophone();
-    void OnMicrophoneInterface(bool active);
+    bool OnMicrophoneInterface(bool active);
 
 private:
     UsbAudio() = default;
@@ -90,6 +93,9 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};
     std::atomic<bool> mic_streaming_{false};
+    std::atomic<bool> mic_muted_{false};
+    std::mutex mic_state_mutex_;
+    bool mode_handoff_ = false;
     Config config_;
     UsbMediaControl media_;
 
